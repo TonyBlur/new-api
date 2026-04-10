@@ -961,6 +961,7 @@ export const useChannelsData = () => {
 
     const models = currentTestChannel.models
       .split(',')
+      .filter(Boolean)
       .filter((model) =>
         model.toLowerCase().includes(modelSearchKeyword.toLowerCase()),
       );

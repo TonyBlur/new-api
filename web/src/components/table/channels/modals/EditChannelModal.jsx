@@ -61,6 +61,7 @@ import ModelSelectModal from './ModelSelectModal';
 import SingleModelSelectModal from './SingleModelSelectModal';
 import OllamaModelModal from './OllamaModelModal';
 import CodexOAuthModal from './CodexOAuthModal';
+import AntigravityOAuthModal from './AntigravityOAuthModal';
 import ParamOverrideEditorModal from './ParamOverrideEditorModal';
 import JSONEditor from '../../../common/ui/JSONEditor';
 import SecureVerificationModal from '../../../common/modals/SecureVerificationModal';
@@ -129,11 +130,6 @@ const PARAM_OVERRIDE_OPERATIONS_TEMPLATE = {
 
 const DEPRECATED_DOUBAO_CODING_PLAN_BASE_URL = 'doubao-coding-plan';
 
-// 支持并且已适配通过接口获取模型列表的渠道类型
-const MODEL_FETCHABLE_TYPES = new Set([
-  1, 4, 14, 34, 17, 26, 27, 24, 47, 25, 20, 23, 31, 40, 42, 48, 43,
-]);
-
 function type2secretPrompt(type) {
   // inputs.type === 15 ? '按照如下格式输入：APIKey|SecretKey' : (inputs.type === 18 ? '按照如下格式输入：APPID|APISecret|APIKey' : '请输入渠道对应的鉴权密钥')
   switch (type) {
@@ -155,6 +151,8 @@ function type2secretPrompt(type) {
       return '按照如下格式输入: AccessKey|SecretAccessKey';
     case 57:
       return '请输入 JSON 格式的 OAuth 凭据（必须包含 access_token 和 account_id）';
+    case 58:
+      return '请输入 JSON 格式的 OAuth 凭据（必须包含 access_token 和 project_id）';
     default:
       return '请输入渠道对应的鉴权密钥';
   }
@@ -364,6 +362,8 @@ const EditChannelModal = (props) => {
   const [ionetMetadata, setIonetMetadata] = useState(null);
   const [codexOAuthModalVisible, setCodexOAuthModalVisible] = useState(false);
   const [codexCredentialRefreshing, setCodexCredentialRefreshing] =
+    useState(false);
+  const [antigravityOAuthModalVisible, setAntigravityOAuthModalVisible] =
     useState(false);
   const [paramOverrideEditorVisible, setParamOverrideEditorVisible] =
     useState(false);
@@ -1210,6 +1210,11 @@ const EditChannelModal = (props) => {
     formatJsonField('key');
   };
 
+  const handleAntigravityOAuthGenerated = (key) => {
+    handleInputChange('key', key);
+    formatJsonField('key');
+  };
+
   const handleRefreshCodexCredential = async () => {
     if (!isEdit) return;
 
@@ -1524,9 +1529,9 @@ const EditChannelModal = (props) => {
     let localInputs = { ...formValues };
     localInputs.param_override = inputs.param_override;
 
-    if (localInputs.type === 57) {
+    if (localInputs.type === 57 || localInputs.type === 58) {
       if (batch) {
-        showInfo(t('Codex 渠道不支持批量创建'));
+        showInfo(t('Codex/Antigravity 渠道不支持批量创建'));
         return;
       }
 
@@ -1548,14 +1553,23 @@ const EditChannelModal = (props) => {
             return;
           }
           const accessToken = String(parsed.access_token || '').trim();
-          const accountId = String(parsed.account_id || '').trim();
           if (!accessToken) {
             showInfo(t('密钥 JSON 必须包含 access_token'));
             return;
           }
-          if (!accountId) {
-            showInfo(t('密钥 JSON 必须包含 account_id'));
-            return;
+          // Codex requires account_id, Antigravity requires project_id
+          if (localInputs.type === 57) {
+            const accountId = String(parsed.account_id || '').trim();
+            if (!accountId) {
+              showInfo(t('密钥 JSON 必须包含 account_id'));
+              return;
+            }
+          } else if (localInputs.type === 58) {
+            const projectId = String(parsed.project_id || '').trim();
+            if (!projectId) {
+              showInfo(t('密钥 JSON 必须包含 project_id'));
+              return;
+            }
           }
           localInputs.key = JSON.stringify(parsed);
         } catch (error) {
@@ -1954,7 +1968,10 @@ const EditChannelModal = (props) => {
     }
   };
 
-  const batchAllowed = (!isEdit || isMultiKeyChannel) && inputs.type !== 57;
+  const batchAllowed =
+    (!isEdit || isMultiKeyChannel) &&
+    inputs.type !== 57 &&
+    inputs.type !== 58;
   const batchExtra = batchAllowed ? (
     <Space>
       {!isEdit && (
@@ -2614,6 +2631,17 @@ const EditChannelModal = (props) => {
                       />
                     )}
 
+                    {inputs.type === 58 && (
+                      <Banner
+                        type='warning'
+                        closeIcon={null}
+                        className='mb-4 rounded-xl'
+                        description={t(
+                          '免责声明：仅限个人使用，请勿分发或共享任何凭证。该渠道存在前置条件与使用门槛，请在充分了解流程与风险后使用，并遵守 Google 的相关条款与政策。相关凭证与配置仅限接入 Antigravity 使用，不适用于其他客户端、平台或渠道。',
+                        )}
+                      />
+                    )}
+
                     {inputs.type === 20 && (
                       <Form.Switch
                         field='is_enterprise_account'
@@ -2877,6 +2905,91 @@ const EditChannelModal = (props) => {
                               visible={codexOAuthModalVisible}
                               onCancel={() => setCodexOAuthModalVisible(false)}
                               onSuccess={handleCodexOAuthGenerated}
+                            />
+                          </>
+                        ) : inputs.type === 58 ? (
+                          <>
+                            <Form.TextArea
+                              field='key'
+                              label={
+                                isEdit
+                                  ? t(
+                                      '密钥（编辑模式下，保存的密钥不会显示）',
+                                    )
+                                  : t('密钥')
+                              }
+                              placeholder={t(
+                                '请输入 JSON 格式的 OAuth 凭据，例如：\n{\n  "access_token": "...",\n  "refresh_token": "...",\n  "project_id": "..."\n}',
+                              )}
+                              rules={
+                                isEdit
+                                  ? []
+                                  : [
+                                      {
+                                        required: true,
+                                        message: t('请输入密钥'),
+                                      },
+                                    ]
+                              }
+                              autoComplete='new-password'
+                              onChange={(value) =>
+                                handleInputChange('key', value)
+                              }
+                              disabled={isIonetLocked}
+                              extraText={
+                                <div className='flex flex-col gap-2'>
+                                  <Text type='tertiary' size='small'>
+                                    {t(
+                                      '仅支持 JSON 对象，必须包含 access_token 与 project_id',
+                                    )}
+                                  </Text>
+
+                                  <Space wrap spacing='tight'>
+                                    <Button
+                                      size='small'
+                                      type='primary'
+                                      theme='outline'
+                                      onClick={() =>
+                                        setAntigravityOAuthModalVisible(true)
+                                      }
+                                      disabled={isIonetLocked}
+                                    >
+                                      {t('Antigravity 授权')}
+                                    </Button>
+                                    <Button
+                                      size='small'
+                                      type='primary'
+                                      theme='outline'
+                                      onClick={() => formatJsonField('key')}
+                                      disabled={isIonetLocked}
+                                    >
+                                      {t('格式化')}
+                                    </Button>
+                                    {isEdit && (
+                                      <Button
+                                        size='small'
+                                        type='primary'
+                                        theme='outline'
+                                        onClick={handleShow2FAModal}
+                                        disabled={isIonetLocked}
+                                      >
+                                        {t('查看密钥')}
+                                      </Button>
+                                    )}
+                                    {batchExtra}
+                                  </Space>
+                                </div>
+                              }
+                              autosize
+                              showClear
+                            />
+
+                            <AntigravityOAuthModal
+                              visible={antigravityOAuthModalVisible}
+                              onCancel={() =>
+                                setAntigravityOAuthModalVisible(false)
+                              }
+                              onSuccess={handleAntigravityOAuthGenerated}
                             />
                           </>
                         ) : inputs.type === 41 &&
@@ -3334,6 +3447,7 @@ const EditChannelModal = (props) => {
                         inputs.type !== 8 &&
                         inputs.type !== 22 &&
                         inputs.type !== 36 &&
+                        inputs.type !== 58 &&
                         (inputs.type !== 45 || doubaoApiEditUnlocked) && (
                           <div>
                             <Form.Input
