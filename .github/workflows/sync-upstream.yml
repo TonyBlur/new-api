@@ -1,0 +1,87 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 每7天自动执行一次（UTC 周一 02:00，即北京时间 10:00）
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync from upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/Calcium-Ion/new-api.git || true
+          git fetch upstream main
+
+      - name: Check for changes
+        id: check
+        run: |
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+          echo "local=$LOCAL" >> $GITHUB_OUTPUT
+          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
+          if [ "$LOCAL" = "$UPSTREAM" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "Already up to date with upstream."
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Upstream has new commits: $LOCAL → $UPSTREAM"
+            git log --oneline HEAD..upstream/main | head -20
+          fi
+
+      - name: Create sync branch and PR
+        if: steps.check.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="sync/upstream-$(date +'%Y%m%d-%H%M%S')"
+          git checkout -b "$BRANCH"
+          git merge upstream/main --no-edit
+
+          # Push the sync branch
+          git push origin "$BRANCH"
+
+          # Create PR
+          UPSTREAM_SHA=$(git rev-parse upstream/main | cut -c1-7)
+          gh pr create \
+            --title "sync: upstream main → ${UPSTREAM_SHA}" \
+            --body "Automated sync from [Calcium-Ion/new-api](https://github.com/Calcium-Ion/new-api) upstream.
+
+          Upstream commits since last sync:
+          $(git log --oneline origin/main..upstream/main)
+
+          ---
+          This PR was created automatically by the **sync-upstream** workflow." \
+            --base main \
+            --head "$BRANCH"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Local: \`${{ steps.check.outputs.local }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Upstream: \`${{ steps.check.outputs.upstream }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check.outputs.has_changes }}" = "true" ]; then
+            echo "- ✅ PR created for upstream sync" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⏭️ Already up to date, no PR needed" >> $GITHUB_STEP_SUMMARY
+          fi
