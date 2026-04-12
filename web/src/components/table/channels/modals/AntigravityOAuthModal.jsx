@@ -75,10 +75,30 @@ const AntigravityOAuthModal = ({ visible, onCancel, onSuccess }) => {
 
     setLoading(true);
     try {
+      // Extract code and state from the pasted callback URL
+      let code = input.trim();
+      let state = '';
+      if (code.startsWith('http://') || code.startsWith('https://')) {
+        try {
+          const url = new URL(code);
+          code = url.searchParams.get('code') || '';
+          state = url.searchParams.get('state') || '';
+        } catch {
+          // Not a valid URL, use as-is
+        }
+      }
+
+      if (!code) {
+        showError(t('无法从 URL 中提取授权码'));
+        setLoading(false);
+        return;
+      }
+
       const res = await API.post(
         '/api/channel/antigravity/oauth/complete',
         { 
-          code: input.trim(),
+          code: code,
+          state: state,
         },
         { skipErrorHandler: true },
       );

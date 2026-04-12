@@ -2875,6 +2875,7 @@
     "请先填写服务器地址，以自动生成完整的端点 URL": "Please enter the server address first to auto-generate full endpoint URLs",
     "请先开启并填写音频输入价格。": "Enable and fill in the audio input price first.",
     "请先粘贴回调 URL": "Please paste the callback URL first",
+    "无法从 URL 中提取授权码": "Cannot extract authorization code from URL",
     "请先输入密钥": "Please enter the key first",
     "请先选择一个作为模板的模型": "Please select a model to use as the template first",
     "请先选择一条规则": "Please select a rule first",

@@ -3201,6 +3201,7 @@
     "请先登录": "Vui lòng đăng nhập trước",
     "请先登录！": "Vui lòng đăng nhập trước!",
     "请先粘贴回调 URL": "Vui lòng dán URL callback trước",
+    "无法从 URL 中提取授权码": "Không thể trích xuất mã ủy quyền từ URL",
     "请先输入密钥": "Vui lòng nhập khóa trước",
     "请先选择一个作为模板的模型": "Vui lòng chọn trước một mô hình làm mẫu",
     "请先选择一条规则": "Vui lòng chọn một quy tắc trước",
