@@ -36,18 +36,12 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: main
 
       - name: Resolve tag & write VERSION
         run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.tag }}"
-            # Verify tag exists
-            if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-              echo "Error: Tag '$TAG' does not exist in the repository"
-              exit 1
-            fi
           else
             TAG=${GITHUB_REF#refs/tags/}
           fi
