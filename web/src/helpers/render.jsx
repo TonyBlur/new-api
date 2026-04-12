@@ -331,6 +331,15 @@ export function getChannelIcon(channelType) {
     case 3: // Azure OpenAI
     case 57: // Codex
       return <OpenAI size={iconSize} />;
+    case 58: // Antigravity
+      // Use Google Cloud style icon for Antigravity
+      return (
+        <img
+          src="https://lh3.googleusercontent.com/41scqSNyk4ZzelUjCLCoLZmQOhglhpma3fgrZydtfTcDkcbbMuEBZbTWmJY4oyCy7PwN"
+          alt="Antigravity"
+          style={{ width: iconSize, height: iconSize, borderRadius: '50%' }}
+        />
+      );
     case 2: // Midjourney Proxy
     case 5: // Midjourney Proxy Plus
       return <Midjourney size={iconSize} />;
@@ -973,7 +982,7 @@ export const renderGroupOption = (item) => {
           {label}
         </Typography.Text>
       </div>
-      {item.ratio && renderRatio(item.ratio)}
+      {item.ratio !== undefined && item.ratio !== null && renderRatio(item.ratio)}
     </div>
   );
 };

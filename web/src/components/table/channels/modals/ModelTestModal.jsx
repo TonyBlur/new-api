@@ -74,6 +74,7 @@ const ModelTestModal = ({
   const filteredModels = hasChannel
     ? currentTestChannel.models
         .split(',')
+        .filter(Boolean)
         .filter((model) =>
           model.toLowerCase().includes(modelSearchKeyword.toLowerCase()),
         )
@@ -123,6 +124,7 @@ const ModelTestModal = ({
     if (!currentTestChannel) return;
     const successKeys = currentTestChannel.models
       .split(',')
+      .filter(Boolean)
       .filter((m) => m.toLowerCase().includes(modelSearchKeyword.toLowerCase()))
       .filter((m) => {
         const result = modelTestResults[`${currentTestChannel.id}-${m}`];
@@ -260,7 +262,7 @@ const ModelTestModal = ({
                 {currentTestChannel.name} {t('渠道的模型测试')}
               </Typography.Text>
               <Typography.Text type='tertiary' size='small'>
-                {t('共')} {currentTestChannel.models.split(',').length}{' '}
+                {t('共')} {currentTestChannel.models.split(',').filter(Boolean).length}{' '}
                 {t('个模型')}
               </Typography.Text>
             </div>
