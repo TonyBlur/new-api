@@ -1,0 +1,72 @@
+version: '3.4'
+
+# 本地开发测试配置
+# 使用方法：
+#   构建并启动：docker-compose -f docker-compose.dev.yml up --build
+#   仅重建后端：docker-compose -f docker-compose.dev.yml up --build new-api
+#   查看日志：  docker-compose -f docker-compose.dev.yml logs -f new-api
+#   停止：      docker-compose -f docker-compose.dev.yml down
+
+services:
+  new-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: new-api-dev
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - SQL_DSN=postgresql://root:devpass@postgres:5432/new-api
+      - REDIS_CONN_STRING=redis://redis
+      - TZ=Asia/Shanghai
+      - ERROR_LOG_ENABLED=true
+      - BATCH_UPDATE_ENABLED=true
+      - GIN_MODE=debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -c 'success' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:latest
+    container_name: new-api-dev-redis
+    restart: unless-stopped
+    networks:
+      - dev-network
+
+  postgres:
+    image: postgres:15
+    container_name: new-api-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: new-api
+    volumes:
+      - dev_pg_data:/var/lib/postgresql/data
+    networks:
+      - dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d new-api"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  dev_pg_data:
+
+networks:
+  dev-network:
+    driver: bridge

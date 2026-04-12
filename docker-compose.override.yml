@@ -1,0 +1,13 @@
+# 本地开发覆盖配置（不提交到 git）
+# docker compose up 会自动合并 docker-compose.yml + 此文件
+services:
+  new-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - HTTP_PROXY=http://host.docker.internal:7897
+      - HTTPS_PROXY=http://host.docker.internal:7897
+      - NO_PROXY=localhost,127.0.0.1,postgres,redis

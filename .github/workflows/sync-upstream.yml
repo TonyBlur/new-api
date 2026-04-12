@@ -48,23 +48,40 @@ jobs:
             git log --oneline HEAD..upstream/main | head -20
           fi
 
-      - name: Create sync branch and PR
+      - name: Try fast-forward merge
+        id: merge
         if: steps.check.outputs.has_changes == 'true'
+        run: |
+          # Try merge with --no-edit (auto-resolve if possible)
+          if git merge upstream/main --no-edit; then
+            echo "merge_conflict=false" >> $GITHUB_OUTPUT
+          else
+            echo "merge_conflict=true" >> $GITHUB_OUTPUT
+            git merge --abort
+          fi
+
+      - name: Direct push on success
+        if: steps.merge.outputs.merge_conflict == 'false'
+        run: |
+          git push origin main
+          echo "✅ Merged upstream directly into main"
+
+      - name: Create PR on conflict
+        if: steps.merge.outputs.merge_conflict == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH="sync/upstream-$(date +'%Y%m%d-%H%M%S')"
           git checkout -b "$BRANCH"
-          git merge upstream/main --no-edit
-
-          # Push the sync branch
+          git merge upstream/main --no-edit || true
           git push origin "$BRANCH"
 
-          # Create PR
           UPSTREAM_SHA=$(git rev-parse upstream/main | cut -c1-7)
           gh pr create \
-            --title "sync: upstream main → ${UPSTREAM_SHA}" \
+            --title "sync: upstream main → ${UPSTREAM_SHA} (conflicts)" \
             --body "Automated sync from [Calcium-Ion/new-api](https://github.com/Calcium-Ion/new-api) upstream.
+
+          ⚠️ **Merge conflicts detected** — manual resolution required.
 
           Upstream commits since last sync:
           $(git log --oneline origin/main..upstream/main)
@@ -80,8 +97,10 @@ jobs:
           echo "### Sync Summary" >> $GITHUB_STEP_SUMMARY
           echo "- Local: \`${{ steps.check.outputs.local }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Upstream: \`${{ steps.check.outputs.upstream }}\`" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.check.outputs.has_changes }}" = "true" ]; then
-            echo "- ✅ PR created for upstream sync" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check.outputs.has_changes }}" = "false" ]; then
+            echo "- ⏭️ Already up to date, no action needed" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.merge.outputs.merge_conflict }}" = "false" ]; then
+            echo "- ✅ Merged upstream directly into main (no conflicts)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- ⏭️ Already up to date, no PR needed" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Merge conflicts detected, PR created for manual resolution" >> $GITHUB_STEP_SUMMARY
           fi
