@@ -20,7 +20,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
 
       - name: Configure git
         run: |
@@ -69,11 +69,14 @@ jobs:
       - name: Create PR on conflict
         if: steps.merge.outputs.merge_conflict == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
         run: |
           BRANCH="sync/upstream-$(date +'%Y%m%d-%H%M%S')"
           git checkout -b "$BRANCH"
+          # Merge with conflict markers so the PR shows what conflicts exist
           git merge upstream/main --no-edit || true
+          git add -A
+          git commit -m "sync: merge upstream with conflicts" --allow-empty
           git push origin "$BRANCH"
 
           UPSTREAM_SHA=$(git rev-parse upstream/main | cut -c1-7)
