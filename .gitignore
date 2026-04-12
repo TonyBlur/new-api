@@ -31,3 +31,12 @@ data/
 .gopath
 
 token_estimator_test.go
+
+# Local development files
+new-api-linux
+test_api_unix.sh
+test_proxy.sh
+Dockerfile.dev
+Dockerfile.local
+docker-compose.dev.yml
+docker-compose.override.yml
