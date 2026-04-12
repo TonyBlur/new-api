@@ -29,11 +29,5 @@ data/
 .gomodcache/
 .gocache-temp
 .gopath
-test_api_unix.sh
-test_proxy.sh
-new-api-linux
-Dockerfile.local
-Dockerfile.dev
-docker-compose.override.yml
-docker-compose.dev.yml
-docker-build.log
+
+token_estimator_test.go
