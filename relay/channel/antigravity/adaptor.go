@@ -25,10 +25,11 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
-	return nil, errors.New("antigravity channel: endpoint not supported")
+	return nil, errors.New("antigravity channel: Gemini native endpoint not supported, use /v1/chat/completions, /v1/messages or /v1/responses")
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	common.SysLog(fmt.Sprintf("antigravity: ConvertClaudeRequest called, model=%s, RelayMode=%d, path=%s", request.Model, info.RelayMode, info.RequestURLPath))
 	// Parse OAuth key from info.ApiKey
 	key := strings.TrimSpace(info.ApiKey)
 	if !strings.HasPrefix(key, "{") {
@@ -290,11 +291,11 @@ func convertClaudeToolsToAntigravityFormat(tools any) []map[string]interface{} {
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	return nil, errors.New("antigravity channel: endpoint not supported")
+	return nil, errors.New("antigravity channel: audio endpoint not supported")
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	return nil, errors.New("antigravity channel: endpoint not supported")
+	return nil, errors.New("antigravity channel: image endpoint not supported")
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -389,6 +390,7 @@ type AntigravityFunctionCallingConfig struct {
 // ---- OpenAI Chat Completions conversion ----
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
+	common.SysLog(fmt.Sprintf("antigravity: ConvertOpenAIRequest called, model=%s, RelayMode=%d, path=%s", request.Model, info.RelayMode, info.RequestURLPath))
 	// Parse OAuth key from info.ApiKey
 	key := strings.TrimSpace(info.ApiKey)
 	if !strings.HasPrefix(key, "{") {
@@ -604,6 +606,7 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 // ---- OpenAI Responses API conversion ----
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	common.SysLog(fmt.Sprintf("antigravity: ConvertOpenAIResponsesRequest called, model=%s, RelayMode=%d, path=%s", request.Model, info.RelayMode, info.RequestURLPath))
 	// Parse OAuth key from info.ApiKey (SetupRequestHeader hasn't been called yet)
 	key := strings.TrimSpace(info.ApiKey)
 	if !strings.HasPrefix(key, "{") {
