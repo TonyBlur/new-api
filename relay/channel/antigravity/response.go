@@ -297,6 +297,66 @@ func unwrapSSEData(data string) string {
 	return data
 }
 
+// AntigravityGeminiHandler handles non-streaming Gemini native format responses
+// Unwraps Antigravity wrapper and returns Gemini native format
+func AntigravityGeminiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+	service.CloseResponseBodyGracefully(resp)
+
+	// Unwrap Antigravity response wrapper
+	unwrapped := unwrapAntigravityResponse(responseBody)
+
+	// Create a new response with unwrapped body for Gemini native handler
+	newResp := &http.Response{
+		StatusCode: resp.StatusCode,
+		Header:     resp.Header,
+		Body:       io.NopCloser(strings.NewReader(string(unwrapped))),
+	}
+
+	return gemini.GeminiTextGenerationHandler(c, info, newResp)
+}
+
+// AntigravityGeminiStreamHandler handles streaming Gemini native format responses
+// Unwraps Antigravity SSE wrapper and returns Gemini native SSE stream
+func AntigravityGeminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	// Create a pipe to intercept the stream
+	pr, pw := io.Pipe()
+
+	// Start a goroutine to read from original response, unwrap, and write to pipe
+	go func() {
+		defer pw.Close()
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				unwrapped := unwrapSSEData(data)
+				if _, err := fmt.Fprintf(pw, "data: %s\n\n", unwrapped); err != nil {
+					return
+				}
+			} else if line != "" {
+				if _, err := fmt.Fprintf(pw, "%s\n", line); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Create a new response with the pipe reader
+	newResp := &http.Response{
+		StatusCode: resp.StatusCode,
+		Header:     resp.Header,
+		Body:       pr,
+	}
+
+	return gemini.GeminiTextGenerationStreamHandler(c, info, newResp)
+}
+}
+
 // ---- Responses API handlers ----
 // Antigravity returns Gemini-format responses, but the Responses API expects OpenAI Responses format.
 // These handlers unwrap the Antigravity wrapper, parse the Gemini response, and convert to OpenAI Responses format.

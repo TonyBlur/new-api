@@ -25,7 +25,106 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
-	return nil, errors.New("antigravity channel: Gemini native endpoint not supported, use /v1/chat/completions, /v1/messages or /v1/responses")
+	common.SysLog(fmt.Sprintf("antigravity: ConvertGeminiRequest called, model=%s, RelayMode=%d, path=%s", info.OriginModelName, info.RelayMode, info.RequestURLPath))
+	// Parse OAuth key from info.ApiKey
+	key := strings.TrimSpace(info.ApiKey)
+	if !strings.HasPrefix(key, "{") {
+		return nil, errors.New("antigravity channel: key must be a JSON object")
+	}
+
+	oauthKey, err := ParseOAuthKey(key)
+	if err != nil {
+		return nil, err
+	}
+
+	if oauthKey.ProjectID == "" {
+		return nil, errors.New("antigravity channel: project_id is required in oauth key")
+	}
+
+	// Store oauthKey for later use in GetRequestURL
+	a.oauthKey = oauthKey
+
+	// Resolve model alias
+	model := ResolveModelAlias(info.UpstreamModelName)
+
+	// Convert Gemini native contents to Antigravity contents
+	contents := convertGeminiContentsToAntigravity(request.Contents)
+
+	// Filter out thought/thoughtSignature parts from contents (upstream rejects them)
+	contents = filterAntigravityContents(contents)
+
+	// Convert system instruction
+	var systemInstruction *AntigravityContent
+	if request.SystemInstructions != nil && len(request.SystemInstructions.Parts) > 0 {
+		systemInstruction = &AntigravityContent{
+			Role:  request.SystemInstructions.Role,
+			Parts: convertGeminiPartsToAntigravity(request.SystemInstructions.Parts),
+		}
+	}
+
+	// Convert tools - Gemini tools are json.RawMessage, pass through as-is
+	var antigravityTools []AntigravityTools
+	if len(request.Tools) > 0 {
+		var geminiTools []dto.GeminiChatTool
+		if unmarshalErr := common.Unmarshal(request.Tools, &geminiTools); unmarshalErr == nil && len(geminiTools) > 0 {
+			funcDecls := make([]map[string]interface{}, 0)
+			for _, tool := range geminiTools {
+				if tool.FunctionDeclarations != nil {
+					if fdSlice, ok := tool.FunctionDeclarations.([]interface{}); ok {
+						for _, fd := range fdSlice {
+							if fdMap, ok := fd.(map[string]interface{}); ok {
+								// Rename "parameters" to "parametersJsonSchema"
+								if params, exists := fdMap["parameters"]; exists {
+									fdMap["parametersJsonSchema"] = params
+									delete(fdMap, "parameters")
+								}
+								funcDecls = append(funcDecls, fdMap)
+							}
+						}
+					}
+				}
+			}
+			if len(funcDecls) > 0 {
+				antigravityTools = []AntigravityTools{{FunctionDeclarations: funcDecls}}
+			}
+		}
+	}
+
+	// Build tool config if tools are present
+	var toolConfig *AntigravityToolConfig
+	if len(antigravityTools) > 0 {
+		toolConfig = &AntigravityToolConfig{
+			FunctionCallingConfig: &AntigravityFunctionCallingConfig{
+				Mode: "AUTO",
+			},
+		}
+	}
+
+	// Convert generation config
+	var genConfig *AntigravityGenerationConfig
+	if request.GenerationConfig.Temperature != nil || request.GenerationConfig.MaxOutputTokens != nil || request.GenerationConfig.TopP != nil {
+		genConfig = &AntigravityGenerationConfig{
+			Temperature:     request.GenerationConfig.Temperature,
+			MaxOutputTokens: request.GenerationConfig.MaxOutputTokens,
+			TopP:            request.GenerationConfig.TopP,
+		}
+	}
+
+	// Build the Antigravity request
+	antigravityReq := AntigravityRequest{
+		Model:   model,
+		Project: oauthKey.ProjectID,
+		Request: AntigravityInnerRequest{
+			Contents:          contents,
+			SystemInstruction: systemInstruction,
+			Tools:             antigravityTools,
+			ToolConfig:        toolConfig,
+			GenerationConfig:  genConfig,
+			SafetySettings:    defaultSafetySettings(),
+		},
+	}
+
+	return antigravityReq, nil
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
@@ -362,11 +461,17 @@ type AntigravityContent struct {
 }
 
 type AntigravityPart struct {
-	Text             string                      `json:"text,omitempty"`
-	Thought          bool                        `json:"thought,omitempty"`
-	ThoughtSignature string                      `json:"thoughtSignature,omitempty"`
-	FunctionCall     *AntigravityFunctionCall    `json:"functionCall,omitempty"`
+	Text             string                       `json:"text,omitempty"`
+	Thought          bool                         `json:"thought,omitempty"`
+	ThoughtSignature string                       `json:"thoughtSignature,omitempty"`
+	FunctionCall     *AntigravityFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *AntigravityFunctionResponse `json:"functionResponse,omitempty"`
+	InlineData       *AntigravityInlineData       `json:"inlineData,omitempty"`
+}
+
+type AntigravityInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
 }
 
 type AntigravityFunctionCall struct {
@@ -385,6 +490,55 @@ type AntigravityToolConfig struct {
 
 type AntigravityFunctionCallingConfig struct {
 	Mode string `json:"mode"` // "VALIDATED", "AUTO", "ANY", "NONE"
+}
+
+// ---- Gemini native format conversion ----
+
+// convertGeminiContentsToAntigravity converts Gemini native contents to Antigravity contents format
+func convertGeminiContentsToAntigravity(contents []dto.GeminiChatContent) []AntigravityContent {
+	result := make([]AntigravityContent, 0, len(contents))
+	for _, c := range contents {
+		ac := AntigravityContent{
+			Role:  c.Role,
+			Parts: convertGeminiPartsToAntigravity(c.Parts),
+		}
+		result = append(result, ac)
+	}
+	return result
+}
+
+// convertGeminiPartsToAntigravity converts Gemini parts to Antigravity parts format
+func convertGeminiPartsToAntigravity(parts []dto.GeminiPart) []AntigravityPart {
+	result := make([]AntigravityPart, 0, len(parts))
+	for _, p := range parts {
+		ap := AntigravityPart{
+			Text: p.Text,
+		}
+		if p.FunctionCall != nil {
+			argsJSON, _ := common.Marshal(p.FunctionCall.Arguments)
+			ap.FunctionCall = &AntigravityFunctionCall{
+				Name: p.FunctionCall.FunctionName,
+				Args: argsJSON,
+			}
+			ap.ThoughtSignature = "skip_thought_signature_validator"
+		}
+		if p.FunctionResponse != nil {
+			respJSON, _ := common.Marshal(p.FunctionResponse.Response)
+			ap.FunctionResponse = &AntigravityFunctionResponse{
+				Name:     p.FunctionResponse.Name,
+				Response: respJSON,
+			}
+		}
+		// Handle inline data (images, etc.)
+		if p.InlineData != nil {
+			ap.InlineData = &AntigravityInlineData{
+				MimeType: p.InlineData.MimeType,
+				Data:     p.InlineData.Data,
+			}
+		}
+		result = append(result, ap)
+	}
+	return result
 }
 
 // ---- OpenAI Chat Completions conversion ----
@@ -838,6 +992,14 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
+	// Gemini native format - return Gemini native response
+	if info.RelayMode == relayconstant.RelayModeGemini {
+		if info.IsStream {
+			return AntigravityGeminiStreamHandler(c, info, resp)
+		}
+		return AntigravityGeminiHandler(c, info, resp)
+	}
+
 	// Claude /v1/messages format
 	if info.RelayFormat == types.RelayFormatClaude {
 		if a.forceStream {
@@ -882,16 +1044,20 @@ func (a *Adaptor) GetChannelName() string {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
-	// Support Claude format (RelayModeUnknown + RelayFormatClaude) in addition to Responses and ChatCompletions
-	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact && info.RelayMode != relayconstant.RelayModeChatCompletions {
+	// Support Claude format (RelayModeUnknown + RelayFormatClaude) and Gemini native format (RelayModeGemini)
+	// in addition to Responses and ChatCompletions
+	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact && info.RelayMode != relayconstant.RelayModeChatCompletions && info.RelayMode != relayconstant.RelayModeGemini {
 		if info.RelayFormat != types.RelayFormatClaude {
-			return "", errors.New("antigravity channel: only /v1/responses, /v1/chat/completions and /v1/messages are supported")
+			return "", errors.New("antigravity channel: only /v1/responses, /v1/chat/completions, /v1/messages and Gemini native endpoints are supported")
 		}
 	}
 
 	var path string
 	if info.IsStream || a.forceStream {
 		path = "/v1internal:streamGenerateContent?alt=sse"
+		if info.RelayMode == relayconstant.RelayModeGemini {
+			info.DisablePing = true
+		}
 	} else {
 		path = "/v1internal:generateContent"
 	}
