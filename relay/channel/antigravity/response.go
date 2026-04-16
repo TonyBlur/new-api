@@ -715,3 +715,426 @@ func writeSSE(c *gin.Context, data interface{}) {
 	c.Writer.Write([]byte("data: " + string(jsonData) + "\n\n"))
 	c.Writer.Flush()
 }
+
+// ---- Claude /v1/messages format handlers ----
+
+// geminiToClaudeContent converts Gemini response parts to Claude content blocks
+func geminiToClaudeContent(geminiResp map[string]interface{}) ([]dto.ClaudeMediaMessage, string) {
+	var contentBlocks []dto.ClaudeMediaMessage
+	var stopReason string
+
+	candidates, _ := geminiResp["candidates"].([]interface{})
+	if len(candidates) == 0 {
+		return contentBlocks, "end_turn"
+	}
+	candidate, _ := candidates[0].(map[string]interface{})
+
+	// Map finishReason to Claude stop_reason
+	if fr, ok := candidate["finishReason"].(string); ok {
+		switch fr {
+		case "STOP", "stop":
+			stopReason = "end_turn"
+		case "MAX_TOKENS", "max_tokens":
+			stopReason = "max_tokens"
+		case "SAFETY", "safety":
+			stopReason = "end_turn"
+		case "RECITATION", "recitation":
+			stopReason = "end_turn"
+		case "LANGUAGE", "language":
+			stopReason = "end_turn"
+		default:
+			stopReason = "end_turn"
+		}
+	} else {
+		stopReason = "end_turn"
+	}
+
+	c, _ := candidate["content"].(map[string]interface{})
+	if c == nil {
+		return contentBlocks, stopReason
+	}
+	parts, _ := c["parts"].([]interface{})
+
+	toolUseIndex := 0
+	for _, p := range parts {
+		partMap, _ := p.(map[string]interface{})
+
+		// Thought/reasoning parts → Claude thinking block
+		if thought, _ := partMap["thought"].(bool); thought {
+			if t, _ := partMap["text"].(string); t != "" {
+				contentBlocks = append(contentBlocks, dto.ClaudeMediaMessage{
+					Type:     "thinking",
+					Thinking: &t,
+				})
+			}
+			continue
+		}
+
+		// Function call → Claude tool_use block
+		if fc, _ := partMap["functionCall"].(map[string]interface{}); fc != nil {
+			name, _ := fc["name"].(string)
+			args := fc["args"]
+			toolID := fmt.Sprintf("toolu_%s", common.GetRandomString(12))
+			contentBlocks = append(contentBlocks, dto.ClaudeMediaMessage{
+				Type:  "tool_use",
+				Id:    toolID,
+				Name:  name,
+				Input: args,
+			})
+			toolUseIndex++
+			stopReason = "tool_use"
+			continue
+		}
+
+		// Regular text → Claude text block
+		if t, _ := partMap["text"].(string); t != "" {
+			contentBlocks = append(contentBlocks, dto.ClaudeMediaMessage{
+				Type: "text",
+				Text: &t,
+			})
+		}
+	}
+
+	return contentBlocks, stopReason
+}
+
+// AntigravityClaudeHandler handles non-streaming Antigravity responses for /v1/messages
+func AntigravityClaudeHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+	service.CloseResponseBodyGracefully(resp)
+
+	// Check for error status
+	if resp.StatusCode != http.StatusOK {
+		return nil, types.NewOpenAIError(fmt.Errorf("upstream returned status %d: %s", resp.StatusCode, string(responseBody)), types.ErrorCodeBadResponse, resp.StatusCode)
+	}
+
+	// Unwrap Antigravity response wrapper
+	unwrapped := unwrapAntigravityResponse(responseBody)
+
+	// Parse Gemini response
+	var geminiResp map[string]interface{}
+	if err := common.Unmarshal(unwrapped, &geminiResp); err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+
+	// Convert to Claude format
+	contentBlocks, stopReason := geminiToClaudeContent(geminiResp)
+	promptTokens, completionTokens, _ := geminiUsage(geminiResp)
+
+	claudeResp := dto.ClaudeResponse{
+		Id:         "msg_" + common.GetRandomString(24),
+		Type:       "message",
+		Role:       "assistant",
+		Content:    contentBlocks,
+		Model:      info.UpstreamModelName,
+		StopReason: stopReason,
+		Usage: &dto.ClaudeUsage{
+			InputTokens:  promptTokens,
+			OutputTokens: completionTokens,
+		},
+	}
+
+	respBytes, err := common.Marshal(claudeResp)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Writer.Write(respBytes)
+
+	usage := &dto.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+	}
+
+	return usage, nil
+}
+
+// AntigravityClaudeStreamHandler handles streaming Antigravity responses for /v1/messages
+func AntigravityClaudeStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+
+	msgID := "msg_" + common.GetRandomString(24)
+
+	// Send message_start event
+	startEvent := dto.ClaudeResponse{
+		Type: "message_start",
+		Message: &dto.ClaudeMediaMessage{
+			Id:    msgID,
+			Type:  "message",
+			Role:  "assistant",
+			Model: info.UpstreamModelName,
+			Usage: &dto.ClaudeUsage{InputTokens: 0, OutputTokens: 0},
+		},
+	}
+	writeClaudeSSE(c, startEvent)
+
+	// Send content_block_start for text
+	writeClaudeSSE(c, dto.ClaudeResponse{
+		Type:  "content_block_start",
+		Index: intPtr(0),
+		ContentBlock: &dto.ClaudeMediaMessage{
+			Type: "text",
+			Text: strPtr(""),
+		},
+	})
+
+	// Read and process the Antigravity SSE stream
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var totalText string
+	var stopReason string = "end_turn"
+	var promptTokens, completionTokens int
+	contentBlockIndex := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		data = strings.TrimSpace(data)
+		if data == "[DONE]" {
+			break
+		}
+
+		// Unwrap Antigravity wrapper
+		unwrapped := unwrapSSEData(data)
+
+		var chunk map[string]interface{}
+		if err := common.Unmarshal(json.RawMessage(unwrapped), &chunk); err != nil {
+			continue
+		}
+
+		// Extract usage metadata
+		if um, ok := chunk["usageMetadata"].(map[string]interface{}); ok {
+			if v, ok := um["promptTokenCount"].(float64); ok {
+				promptTokens = int(v)
+			}
+			if v, ok := um["candidatesTokenCount"].(float64); ok {
+				completionTokens = int(v)
+			}
+		}
+
+		// Extract candidates
+		candidates, _ := chunk["candidates"].([]interface{})
+		if len(candidates) == 0 {
+			continue
+		}
+		candidate, _ := candidates[0].(map[string]interface{})
+
+		// Check finishReason
+		if fr, ok := candidate["finishReason"].(string); ok {
+			switch fr {
+			case "STOP":
+				stopReason = "end_turn"
+			case "MAX_TOKENS":
+				stopReason = "max_tokens"
+			case "SAFETY":
+				stopReason = "end_turn"
+			default:
+				stopReason = "end_turn"
+			}
+		}
+
+		content, _ := candidate["content"].(map[string]interface{})
+		if content == nil {
+			continue
+		}
+		parts, _ := content["parts"].([]interface{})
+
+		for _, p := range parts {
+			partMap, _ := p.(map[string]interface{})
+
+			// Skip thought parts in streaming
+			if thought, _ := partMap["thought"].(bool); thought {
+				continue
+			}
+
+			// Function call
+			if fc, _ := partMap["functionCall"].(map[string]interface{}); fc != nil {
+				// Close the current text block first
+				if totalText != "" || contentBlockIndex == 0 {
+					writeClaudeSSE(c, dto.ClaudeResponse{
+						Type:  "content_block_stop",
+						Index: intPtr(contentBlockIndex),
+					})
+					contentBlockIndex++
+				}
+
+				name, _ := fc["name"].(string)
+				args := fc["args"]
+				toolID := fmt.Sprintf("toolu_%s", common.GetRandomString(12))
+
+				// Send tool_use content_block_start
+				writeClaudeSSE(c, dto.ClaudeResponse{
+					Type:  "content_block_start",
+					Index: intPtr(contentBlockIndex),
+					ContentBlock: &dto.ClaudeMediaMessage{
+						Type:  "tool_use",
+						Id:    toolID,
+						Name:  name,
+						Input: map[string]interface{}{},
+					},
+				})
+
+				// Send tool input as delta
+				argsJSON, _ := common.Marshal(args)
+				writeClaudeSSE(c, dto.ClaudeResponse{
+					Type:  "content_block_delta",
+					Index: intPtr(contentBlockIndex),
+					Delta: &dto.ClaudeMediaMessage{
+						Type:        "input_json_delta",
+						PartialJson: strPtr(string(argsJSON)),
+					},
+				})
+
+				// Close tool block
+				writeClaudeSSE(c, dto.ClaudeResponse{
+					Type:  "content_block_stop",
+					Index: intPtr(contentBlockIndex),
+				})
+				contentBlockIndex++
+				stopReason = "tool_use"
+				continue
+			}
+
+			// Text delta
+			if t, _ := partMap["text"].(string); t != "" {
+				totalText += t
+				writeClaudeSSE(c, dto.ClaudeResponse{
+					Type:  "content_block_delta",
+					Index: intPtr(contentBlockIndex),
+					Delta: &dto.ClaudeMediaMessage{
+						Type:  "text_delta",
+						Delta: t,
+					},
+				})
+			}
+		}
+	}
+	resp.Body.Close()
+
+	// Close the last text content block
+	writeClaudeSSE(c, dto.ClaudeResponse{
+		Type:  "content_block_stop",
+		Index: intPtr(contentBlockIndex),
+	})
+
+	// Send message_delta with stop reason
+	writeClaudeSSE(c, dto.ClaudeResponse{
+		Type: "message_delta",
+		Delta: &dto.ClaudeMediaMessage{
+			StopReason: &stopReason,
+		},
+		Usage: &dto.ClaudeUsage{
+			OutputTokens: completionTokens,
+		},
+	})
+
+	// Send message_stop
+	writeClaudeSSE(c, dto.ClaudeResponse{
+		Type: "message_stop",
+	})
+
+	c.Writer.Write([]byte("data: [DONE]\n\n"))
+	c.Writer.Flush()
+
+	usage := &dto.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+	}
+
+	return usage, nil
+}
+
+// AntigravityClaudeStreamToChatHandler handles forceStream for /v1/messages
+// Collects streaming response and returns as non-streaming Claude JSON
+func AntigravityClaudeStreamToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	// Collect all SSE chunks from the Gemini stream
+	var allChunks []json.RawMessage
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		data = strings.TrimSpace(data)
+		if data == "[DONE]" {
+			break
+		}
+		// Unwrap Antigravity wrapper
+		unwrapped := unwrapSSEData(data)
+		allChunks = append(allChunks, json.RawMessage(unwrapped))
+	}
+	resp.Body.Close()
+
+	// Merge chunks into a single Gemini response
+	mergedResponse := mergeGeminiStreamChunks(allChunks)
+
+	// Convert to Claude format
+	contentBlocks, stopReason := geminiToClaudeContent(mergedResponse)
+	promptTokens, completionTokens, _ := geminiUsage(mergedResponse)
+
+	claudeResp := dto.ClaudeResponse{
+		Id:         "msg_" + common.GetRandomString(24),
+		Type:       "message",
+		Role:       "assistant",
+		Content:    contentBlocks,
+		Model:      info.UpstreamModelName,
+		StopReason: stopReason,
+		Usage: &dto.ClaudeUsage{
+			InputTokens:  promptTokens,
+			OutputTokens: completionTokens,
+		},
+	}
+
+	respBytes, err := common.Marshal(claudeResp)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Writer.Write(respBytes)
+
+	usage := &dto.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+	}
+
+	return usage, nil
+}
+
+// writeClaudeSSE writes a Claude SSE event
+func writeClaudeSSE(c *gin.Context, data interface{}) {
+	jsonData, err := common.Marshal(data)
+	if err != nil {
+		return
+	}
+	c.Writer.Write([]byte("event: \ndata: " + string(jsonData) + "\n\n"))
+	c.Writer.Flush()
+}
+
+// intPtr returns a pointer to the given int
+func intPtr(i int) *int {
+	return &i
+}
+
+// strPtr returns a pointer to the given string
+func strPtr(s string) *string {
+	return &s
+}

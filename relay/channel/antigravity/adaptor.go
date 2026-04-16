@@ -16,12 +16,11 @@ import (
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/samber/lo"
 )
 
 type Adaptor struct {
-	oauthKey   *OAuthKey
+	oauthKey    *OAuthKey
 	forceStream bool // set to true for gpt-oss non-streaming requests (upstream bug workaround)
 }
 
@@ -29,8 +28,265 @@ func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayIn
 	return nil, errors.New("antigravity channel: endpoint not supported")
 }
 
-func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return nil, errors.New("antigravity channel: /v1/messages endpoint not supported")
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	// Parse OAuth key from info.ApiKey
+	key := strings.TrimSpace(info.ApiKey)
+	if !strings.HasPrefix(key, "{") {
+		return nil, errors.New("antigravity channel: key must be a JSON object")
+	}
+
+	oauthKey, err := ParseOAuthKey(key)
+	if err != nil {
+		return nil, err
+	}
+
+	if oauthKey.ProjectID == "" {
+		return nil, errors.New("antigravity channel: project_id is required in oauth key")
+	}
+
+	// Store oauthKey for later use in GetRequestURL
+	a.oauthKey = oauthKey
+
+	// Resolve model alias and clean model name
+	model := ResolveModelAlias(request.Model)
+
+	// Force streaming for gpt-oss models
+	if strings.HasPrefix(model, "gpt-oss") && !lo.FromPtrOr(request.Stream, false) {
+		a.forceStream = true
+	}
+
+	// Convert Claude messages to Antigravity contents
+	var systemInstruction *AntigravityContent
+	contents := convertClaudeMessagesToContents(request.Messages, request.System, &systemInstruction)
+
+	// Filter out thought/thoughtSignature parts
+	contents = filterAntigravityContents(contents)
+
+	// Convert Claude tools to Antigravity format
+	var antigravityTools []AntigravityTools
+	if request.Tools != nil {
+		funcDecls := convertClaudeToolsToAntigravityFormat(request.Tools)
+		if len(funcDecls) > 0 {
+			antigravityTools = []AntigravityTools{{FunctionDeclarations: funcDecls}}
+		}
+	}
+
+	// Build tool config if tools are present
+	var toolConfig *AntigravityToolConfig
+	if len(antigravityTools) > 0 {
+		toolConfig = &AntigravityToolConfig{
+			FunctionCallingConfig: &AntigravityFunctionCallingConfig{
+				Mode: "AUTO",
+			},
+		}
+	}
+
+	// Build generation config - only include if at least one field is set
+	var genConfig *AntigravityGenerationConfig
+	if request.Temperature != nil || request.MaxTokens != nil || request.TopP != nil {
+		genConfig = &AntigravityGenerationConfig{
+			Temperature:     request.Temperature,
+			MaxOutputTokens: request.MaxTokens,
+			TopP:            request.TopP,
+		}
+	}
+
+	// Build the Antigravity request
+	antigravityReq := AntigravityRequest{
+		Model:   model,
+		Project: oauthKey.ProjectID,
+		Request: AntigravityInnerRequest{
+			Contents:          contents,
+			SystemInstruction: systemInstruction,
+			Tools:             antigravityTools,
+			ToolConfig:        toolConfig,
+			GenerationConfig:  genConfig,
+			SafetySettings:    defaultSafetySettings(),
+		},
+	}
+
+	return antigravityReq, nil
+}
+
+// convertClaudeMessagesToContents converts Claude messages to Antigravity contents format
+func convertClaudeMessagesToContents(messages []dto.ClaudeMessage, system any, systemInstruction **AntigravityContent) []AntigravityContent {
+	contents := make([]AntigravityContent, 0, len(messages))
+
+	// Handle system prompt
+	var systemTexts []string
+	if system != nil {
+		switch s := system.(type) {
+		case string:
+			if s != "" {
+				systemTexts = append(systemTexts, s)
+			}
+		case []any:
+			for _, item := range s {
+				if m, ok := item.(map[string]any); ok {
+					if t, ok := m["text"].(string); ok && t != "" {
+						systemTexts = append(systemTexts, t)
+					}
+				}
+			}
+		}
+	}
+
+	if len(systemTexts) > 0 {
+		parts := make([]AntigravityPart, 0, len(systemTexts))
+		for _, t := range systemTexts {
+			parts = append(parts, AntigravityPart{Text: t})
+		}
+		*systemInstruction = &AntigravityContent{
+			Role:  "user",
+			Parts: parts,
+		}
+	}
+
+	for _, msg := range messages {
+		role := msg.Role
+		// Map Claude roles to Antigravity/Gemini roles
+		switch role {
+		case "assistant":
+			role = "model"
+		}
+
+		content := AntigravityContent{
+			Role: role,
+		}
+
+		// Handle content
+		if msg.Content == nil {
+			continue
+		}
+
+		// String content
+		if str, ok := msg.Content.(string); ok {
+			if str == "" {
+				continue
+			}
+			content.Parts = []AntigravityPart{{Text: str}}
+		} else if arr, ok := msg.Content.([]any); ok {
+			// Array content blocks
+			parts := make([]AntigravityPart, 0, len(arr))
+			for _, item := range arr {
+				block, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				switch block["type"] {
+				case "text":
+					if text, ok := block["text"].(string); ok && text != "" {
+						parts = append(parts, AntigravityPart{Text: text})
+					}
+				case "tool_use":
+					// Convert Claude tool_use to Gemini functionCall
+					funcCall := &AntigravityFunctionCall{}
+					if name, ok := block["name"].(string); ok {
+						funcCall.Name = name
+					}
+					if input, ok := block["input"]; ok {
+						argsJSON, _ := json.Marshal(input)
+						funcCall.Args = json.RawMessage(argsJSON)
+					}
+					parts = append(parts, AntigravityPart{
+						FunctionCall: funcCall,
+					})
+				case "tool_result":
+					// Tool results go as functionResponse
+					funcResp := &AntigravityFunctionResponse{}
+					if id, ok := block["tool_use_id"].(string); ok {
+						funcResp.Name = id // Use tool_use_id as name lookup
+					}
+					// Extract response content
+					if resultContent, ok := block["content"]; ok {
+						switch rc := resultContent.(type) {
+						case string:
+							respJSON, _ := json.Marshal(map[string]any{"content": rc})
+							funcResp.Response = json.RawMessage(respJSON)
+						case []any:
+							// Extract text from content blocks
+							var texts []string
+							for _, rcItem := range rc {
+								if rcBlock, ok := rcItem.(map[string]any); ok {
+									if rcText, ok := rcBlock["text"].(string); ok {
+										texts = append(texts, rcText)
+									}
+								}
+							}
+							if len(texts) > 0 {
+								respJSON, _ := json.Marshal(map[string]any{"content": strings.Join(texts, "\n")})
+								funcResp.Response = json.RawMessage(respJSON)
+							}
+						}
+					}
+					parts = append(parts, AntigravityPart{
+						FunctionResponse: funcResp,
+					})
+				case "thinking":
+					// Skip thinking blocks — upstream rejects them without valid signature
+					continue
+				}
+			}
+			if len(parts) > 0 {
+				content.Parts = parts
+			} else {
+				continue
+			}
+		} else {
+			continue
+		}
+
+		contents = append(contents, content)
+	}
+
+	return contents
+}
+
+// convertClaudeToolsToAntigravityFormat converts Claude tools to Antigravity functionDeclarations
+func convertClaudeToolsToAntigravityFormat(tools any) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0)
+
+	switch t := tools.(type) {
+	case []any:
+		for _, tool := range t {
+			toolMap, ok := tool.(map[string]any)
+			if !ok {
+				continue
+			}
+			if toolMap["type"] != "function" && toolMap["type"] != "custom" {
+				continue
+			}
+			// For type "custom", use the tool name directly; for "function", extract from function field
+			var name, description string
+			var parameters map[string]any
+
+			if fn, ok := toolMap["function"].(map[string]any); ok {
+				name, _ = fn["name"].(string)
+				description, _ = fn["description"].(string)
+				parameters, _ = fn["parameters"].(map[string]any)
+			} else {
+				// Claude custom tool format
+				name, _ = toolMap["name"].(string)
+				description, _ = toolMap["description"].(string)
+				parameters, _ = toolMap["input_schema"].(map[string]any)
+			}
+
+			if name == "" {
+				continue
+			}
+
+			funcDecl := map[string]interface{}{
+				"name":        name,
+				"description": description,
+			}
+			if parameters != nil {
+				funcDecl["parametersJsonSchema"] = parameters
+			}
+			result = append(result, funcDecl)
+		}
+	}
+
+	return result
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -43,6 +299,94 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
+
+// ---- Request structs ----
+// Aligned with CLIProxyAPI format:
+// Template: {"model":"","request":{},"project":""}
+// Reference: https://github.com/router-for-me/CLIProxyAPI/blob/main/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+
+// AntigravityRequest is the top-level request structure for Antigravity API
+type AntigravityRequest struct {
+	Model   string                  `json:"model"`
+	Request AntigravityInnerRequest `json:"request"`
+	Project string                  `json:"project"` // must be empty string, not omitted
+}
+
+// AntigravityInnerRequest is the inner request body (Gemini format)
+type AntigravityInnerRequest struct {
+	Contents          []AntigravityContent         `json:"contents,omitempty"`
+	SystemInstruction *AntigravityContent          `json:"systemInstruction,omitempty"`
+	Tools             []AntigravityTools           `json:"tools,omitempty"`
+	ToolConfig        *AntigravityToolConfig       `json:"toolConfig,omitempty"`
+	GenerationConfig  *AntigravityGenerationConfig `json:"generationConfig,omitempty"`
+	SafetySettings    []AntigravitySafetySetting   `json:"safetySettings"`
+}
+
+// AntigravityTools wraps function declarations
+// CLIProxyAPI format: [{"functionDeclarations": [...]}]
+type AntigravityTools struct {
+	FunctionDeclarations []map[string]interface{} `json:"functionDeclarations"`
+}
+
+// AntigravityGenerationConfig holds generation parameters
+// CLIProxyAPI puts all generation params inside generationConfig sub-object
+type AntigravityGenerationConfig struct {
+	Temperature     *float64 `json:"temperature,omitempty"`
+	MaxOutputTokens *uint    `json:"maxOutputTokens,omitempty"`
+	TopP            *float64 `json:"topP,omitempty"`
+}
+
+// AntigravitySafetySetting represents a Gemini safety setting
+// CLIProxyAPI AttachDefaultSafetySettings: all filters OFF/BLOCK_NONE
+type AntigravitySafetySetting struct {
+	Category  string `json:"category"`
+	Threshold string `json:"threshold"`
+}
+
+// defaultSafetySettings returns the default safety settings that disable all content filtering
+// Reference: CLIProxyAPI internal/translator/gemini/common/safety.go
+func defaultSafetySettings() []AntigravitySafetySetting {
+	return []AntigravitySafetySetting{
+		{Category: "HARM_CATEGORY_HARASSMENT", Threshold: "OFF"},
+		{Category: "HARM_CATEGORY_HATE_SPEECH", Threshold: "OFF"},
+		{Category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", Threshold: "OFF"},
+		{Category: "HARM_CATEGORY_DANGEROUS_CONTENT", Threshold: "OFF"},
+		{Category: "HARM_CATEGORY_CIVIC_INTEGRITY", Threshold: "BLOCK_NONE"},
+	}
+}
+
+type AntigravityContent struct {
+	Role  string            `json:"role"`
+	Parts []AntigravityPart `json:"parts"`
+}
+
+type AntigravityPart struct {
+	Text             string                      `json:"text,omitempty"`
+	Thought          bool                        `json:"thought,omitempty"`
+	ThoughtSignature string                      `json:"thoughtSignature,omitempty"`
+	FunctionCall     *AntigravityFunctionCall    `json:"functionCall,omitempty"`
+	FunctionResponse *AntigravityFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+type AntigravityFunctionCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
+}
+
+type AntigravityFunctionResponse struct {
+	Name     string          `json:"name"`
+	Response json.RawMessage `json:"response"`
+}
+
+type AntigravityToolConfig struct {
+	FunctionCallingConfig *AntigravityFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
+}
+
+type AntigravityFunctionCallingConfig struct {
+	Mode string `json:"mode"` // "VALIDATED", "AUTO", "ANY", "NONE"
+}
+
+// ---- OpenAI Chat Completions conversion ----
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
 	// Parse OAuth key from info.ApiKey
@@ -74,7 +418,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	}
 
 	// Convert OpenAI messages to Antigravity contents
-	contents := convertMessagesToContents(request.Messages)
+	// CLIProxyAPI: system/developer messages → systemInstruction, others → contents
+	var systemInstruction *AntigravityContent
+	contents := convertMessagesToContents(request.Messages, &systemInstruction)
 
 	// Filter out thought/thoughtSignature parts from contents (upstream rejects them)
 	// Also remove empty content entries after filtering (causes Gemini 3 Flash 400 errors)
@@ -82,17 +428,18 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	contents = filterAntigravityContents(contents)
 
 	// Convert OpenAI tools to Antigravity format
-	var tools json.RawMessage
+	// CLIProxyAPI format: tools is [{"functionDeclarations": [...]}]
+	var antigravityTools []AntigravityTools
 	if len(request.Tools) > 0 {
-		toolsBytes, marshalErr := common.Marshal(convertToolsToAntigravityFormat(request.Tools))
-		if marshalErr == nil {
-			tools = toolsBytes
+		funcDecls := convertToolsToAntigravityFormat(request.Tools)
+		if len(funcDecls) > 0 {
+			antigravityTools = []AntigravityTools{{FunctionDeclarations: funcDecls}}
 		}
 	}
 
 	// Build tool config if tools are present
 	var toolConfig *AntigravityToolConfig
-	if len(request.Tools) > 0 {
+	if len(antigravityTools) > 0 {
 		toolConfig = &AntigravityToolConfig{
 			FunctionCallingConfig: &AntigravityFunctionCallingConfig{
 				Mode: "AUTO",
@@ -100,21 +447,27 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		}
 	}
 
-	// Build the Antigravity request
-	antigravityReq := AntigravityRequest{
-		Project:     oauthKey.ProjectID,
-		Model:       model,
-		UserAgent:   "antigravity",
-		RequestType: "agent",
-		RequestID:   "agent-" + uuid.New().String(),
-		Request: AntigravityInnerRequest{
-			Contents:        contents,
-			SessionID:       uuid.New().String(),
-			Tools:           tools,
-			ToolConfig:      toolConfig,
+	// Build generation config - only include if at least one field is set
+	var genConfig *AntigravityGenerationConfig
+	if request.Temperature != nil || request.MaxCompletionTokens != nil || request.TopP != nil {
+		genConfig = &AntigravityGenerationConfig{
 			Temperature:     request.Temperature,
 			MaxOutputTokens: request.MaxCompletionTokens,
 			TopP:            request.TopP,
+		}
+	}
+
+	// Build the Antigravity request
+	antigravityReq := AntigravityRequest{
+		Model:   model,
+		Project: oauthKey.ProjectID, // OmniRoute uses projectId from OAuth credentials
+		Request: AntigravityInnerRequest{
+			Contents:          contents,
+			SystemInstruction: systemInstruction,
+			Tools:             antigravityTools,
+			ToolConfig:        toolConfig,
+			GenerationConfig:  genConfig,
+			SafetySettings:    defaultSafetySettings(),
 		},
 	}
 
@@ -122,15 +475,23 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 // convertMessagesToContents converts OpenAI chat messages to Antigravity contents format
-func convertMessagesToContents(messages []dto.Message) []AntigravityContent {
+// system/developer messages are extracted into systemInstruction (per CLIProxyAPI convention)
+func convertMessagesToContents(messages []dto.Message, systemInstruction **AntigravityContent) []AntigravityContent {
 	contents := make([]AntigravityContent, 0, len(messages))
+	var systemTexts []string
 
 	for _, msg := range messages {
 		role := msg.Role
-		// Map OpenAI roles to Antigravity roles
+		// Map OpenAI roles to Antigravity/Gemini roles
 		switch role {
-		case "system":
-			role = "user" // Antigravity doesn't have system role, use user
+		case "system", "developer":
+			// CLIProxyAPI: system/developer messages → systemInstruction
+			if msg.Content != nil {
+				if contentStr, ok := msg.Content.(string); ok && contentStr != "" {
+					systemTexts = append(systemTexts, contentStr)
+				}
+			}
+			continue
 		case "assistant":
 			role = "model" // Antigravity uses "model" for assistant
 		case "tool":
@@ -170,6 +531,8 @@ func convertMessagesToContents(messages []dto.Message) []AntigravityContent {
 						Name: tc.Function.Name,
 						Args: args,
 					},
+					// CLIProxyAPI adds thoughtSignature for function calls
+					ThoughtSignature: "skip_thought_signature_validator",
 				})
 			}
 		}
@@ -197,10 +560,19 @@ func convertMessagesToContents(messages []dto.Message) []AntigravityContent {
 		}
 	}
 
+	// Build systemInstruction from collected system messages
+	if len(systemTexts) > 0 {
+		*systemInstruction = &AntigravityContent{
+			Role:  "user",
+			Parts: []AntigravityPart{{Text: strings.Join(systemTexts, "\n")}},
+		}
+	}
+
 	return contents
 }
 
 // convertToolsToAntigravityFormat converts OpenAI tools to Antigravity function declarations format
+// CLIProxyAPI renames "parameters" to "parametersJsonSchema" for Gemini API compatibility
 func convertToolsToAntigravityFormat(tools []dto.ToolCallRequest) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(tools))
 
@@ -211,7 +583,8 @@ func convertToolsToAntigravityFormat(tools []dto.ToolCallRequest) []map[string]i
 				"description": tool.Function.Description,
 			}
 			if tool.Function.Parameters != nil {
-				funcDecl["parameters"] = tool.Function.Parameters
+				// Rename "parameters" to "parametersJsonSchema" as required by Antigravity API
+				funcDecl["parametersJsonSchema"] = tool.Function.Parameters
 			}
 			result = append(result, funcDecl)
 		}
@@ -228,57 +601,7 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 	return nil, errors.New("antigravity channel: /v1/embeddings endpoint not supported")
 }
 
-// AntigravityRequest represents the request format for Antigravity API
-// Based on OmniRoute implementation: https://github.com/xuantungle/omni-route-proxy-hub
-type AntigravityRequest struct {
-	Project     string                   `json:"project"`
-	Model       string                   `json:"model"`
-	UserAgent   string                   `json:"userAgent"`
-	RequestType string                   `json:"requestType"`
-	RequestID   string                   `json:"requestId"`
-	Request     AntigravityInnerRequest  `json:"request"`
-}
-
-type AntigravityInnerRequest struct {
-	Contents      []AntigravityContent `json:"contents,omitempty"`
-	SessionID     string               `json:"sessionId,omitempty"`
-	Tools         json.RawMessage      `json:"tools,omitempty"`
-	ToolConfig    *AntigravityToolConfig `json:"toolConfig,omitempty"`
-	Temperature   *float64             `json:"temperature,omitempty"`
-	MaxOutputTokens *uint              `json:"maxOutputTokens,omitempty"`
-	TopP          *float64             `json:"topP,omitempty"`
-}
-
-type AntigravityContent struct {
-	Role  string                `json:"role"`
-	Parts []AntigravityPart     `json:"parts"`
-}
-
-type AntigravityPart struct {
-	Text             string                    `json:"text,omitempty"`
-	Thought          bool                      `json:"thought,omitempty"`
-	ThoughtSignature json.RawMessage           `json:"thoughtSignature,omitempty"`
-	FunctionCall     *AntigravityFunctionCall  `json:"functionCall,omitempty"`
-	FunctionResponse *AntigravityFunctionResponse `json:"functionResponse,omitempty"`
-}
-
-type AntigravityFunctionCall struct {
-	Name string `json:"name"`
-	Args json.RawMessage `json:"args"`
-}
-
-type AntigravityFunctionResponse struct {
-	Name   string `json:"name"`
-	Response json.RawMessage `json:"response"`
-}
-
-type AntigravityToolConfig struct {
-	FunctionCallingConfig *AntigravityFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
-}
-
-type AntigravityFunctionCallingConfig struct {
-	Mode string `json:"mode"` // "VALIDATED", "AUTO", "ANY"
-}
+// ---- OpenAI Responses API conversion ----
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
 	// Parse OAuth key from info.ApiKey (SetupRequestHeader hasn't been called yet)
@@ -315,40 +638,97 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 		contents = convertInputToContents(request.Input)
 	}
 
+	// Handle the "instructions" field from Responses API as systemInstruction
+	var systemInstruction *AntigravityContent
+	if request.Instructions != nil {
+		var instrText string
+		if err := common.Unmarshal(request.Instructions, &instrText); err == nil && instrText != "" {
+			systemInstruction = &AntigravityContent{
+				Role:  "user",
+				Parts: []AntigravityPart{{Text: instrText}},
+			}
+		}
+	}
+
 	// Filter out thought/thoughtSignature parts from contents (upstream rejects them)
 	// Also remove empty content entries after filtering (causes Gemini 3 Flash 400 errors)
 	// Reference: OmniRoute antigravity.ts transformRequest
 	contents = filterAntigravityContents(contents)
 
-	// Build tool config if tools are present
+	// Convert tools to Antigravity format
+	// CLIProxyAPI format: tools is [{"functionDeclarations": [...]}]
+	var antigravityTools []AntigravityTools
 	var toolConfig *AntigravityToolConfig
 	if request.Tools != nil && len(request.Tools) > 0 {
-		toolConfig = &AntigravityToolConfig{
-			FunctionCallingConfig: &AntigravityFunctionCallingConfig{
-				Mode: "VALIDATED",
-			},
+		funcDecls := convertResponsesToolsToAntigravityFormat(request.Tools)
+		if len(funcDecls) > 0 {
+			antigravityTools = []AntigravityTools{{FunctionDeclarations: funcDecls}}
+			toolConfig = &AntigravityToolConfig{
+				FunctionCallingConfig: &AntigravityFunctionCallingConfig{
+					Mode: "AUTO",
+				},
+			}
+		}
+	}
+
+	// Build generation config - only include if at least one field is set
+	var genConfig *AntigravityGenerationConfig
+	if request.Temperature != nil || request.MaxOutputTokens != nil || request.TopP != nil {
+		genConfig = &AntigravityGenerationConfig{
+			Temperature:     request.Temperature,
+			MaxOutputTokens: request.MaxOutputTokens,
+			TopP:            request.TopP,
 		}
 	}
 
 	// Build the Antigravity request
 	antigravityReq := AntigravityRequest{
-		Project:     oauthKey.ProjectID,
-		Model:       model,
-		UserAgent:   "antigravity",
-		RequestType: "agent",
-		RequestID:   "agent-" + uuid.New().String(),
+		Model:   model,
+		Project: oauthKey.ProjectID, // OmniRoute uses projectId from OAuth credentials
 		Request: AntigravityInnerRequest{
-			Contents:        contents,
-			SessionID:       uuid.New().String(),
-			Tools:           request.Tools,
-			ToolConfig:      toolConfig,
-			Temperature:     request.Temperature,
-			MaxOutputTokens: request.MaxOutputTokens,
-			TopP:            request.TopP,
+			Contents:          contents,
+			SystemInstruction: systemInstruction,
+			Tools:             antigravityTools,
+			ToolConfig:        toolConfig,
+			GenerationConfig:  genConfig,
+			SafetySettings:    defaultSafetySettings(),
 		},
 	}
 
 	return antigravityReq, nil
+}
+
+// convertResponsesToolsToAntigravityFormat converts OpenAI Responses API tools (json.RawMessage)
+// to Antigravity function declarations format
+func convertResponsesToolsToAntigravityFormat(tools json.RawMessage) []map[string]interface{} {
+	var toolsArray []map[string]interface{}
+	if err := common.Unmarshal(tools, &toolsArray); err != nil {
+		return nil
+	}
+
+	result := make([]map[string]interface{}, 0, len(toolsArray))
+	for _, tool := range toolsArray {
+		toolType, _ := tool["type"].(string)
+		switch toolType {
+		case "function":
+			if function, ok := tool["function"].(map[string]interface{}); ok {
+				funcDecl := map[string]interface{}{
+					"name":        function["name"],
+					"description": function["description"],
+				}
+				if params, ok := function["parameters"]; ok {
+					funcDecl["parametersJsonSchema"] = params
+				}
+				result = append(result, funcDecl)
+			}
+		case "google_search":
+			result = append(result, map[string]interface{}{"googleSearch": tool})
+		case "code_execution", "code_interpreter":
+			result = append(result, map[string]interface{}{"codeExecution": tool})
+		}
+	}
+
+	return result
 }
 
 // convertInputToContents converts OpenAI Responses API input format to Antigravity contents format
@@ -398,7 +778,7 @@ func convertInputItemToContent(item map[string]interface{}) *AntigravityContent 
 	}
 	// Map OpenAI roles to Antigravity/Gemini roles (same as chat path)
 	switch role {
-	case "system":
+	case "system", "developer":
 		role = "user"
 	case "assistant":
 		role = "model"
@@ -441,6 +821,7 @@ func convertInputItemToContent(item map[string]interface{}) *AntigravityContent 
 						Name: name,
 						Args: args,
 					},
+					ThoughtSignature: "skip_thought_signature_validator",
 				})
 			}
 		}
@@ -454,16 +835,18 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
+	// Claude /v1/messages format
+	if info.RelayFormat == types.RelayFormatClaude {
+		if a.forceStream {
+			return AntigravityClaudeStreamToChatHandler(c, info, resp)
+		}
+		if info.IsStream {
+			return AntigravityClaudeStreamHandler(c, info, resp)
+		}
+		return AntigravityClaudeHandler(c, info, resp)
+	}
+
 	if info.RelayMode == relayconstant.RelayModeChatCompletions {
-		// Antigravity returns Gemini-format responses wrapped in {"response": {...}}
-		// We need to unwrap before using Gemini chat handlers
-		//
-		// Workaround for gpt-oss: forceStream is set when the original request is non-streaming
-		// but we forced the upstream request to be streaming (to avoid upstream bug).
-		// In this case, we need to collect the streaming response and merge it into a
-		// non-streaming response for the client.
-		// Note: info.IsStream may have been updated by the upstream Content-Type header,
-		// so we check forceStream first.
 		if a.forceStream {
 			return AntigravityStreamToChatHandler(c, info, resp)
 		}
@@ -473,15 +856,10 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		return AntigravityChatHandler(c, info, resp)
 	}
 
-	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact {
+	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact && info.RelayFormat != types.RelayFormatClaude {
 		return nil, types.NewError(errors.New("antigravity channel: endpoint not supported"), types.ErrorCodeInvalidRequest)
 	}
 
-	// Antigravity returns Gemini-format responses, but Responses API expects OpenAI Responses format.
-	// We need to unwrap the Antigravity wrapper, parse Gemini format, and convert to OpenAI Responses format.
-	//
-	// Workaround for gpt-oss non-streaming: forceStream was set to force the upstream
-	// request to use streaming endpoint. Collect SSE stream and merge into a single Gemini response.
 	if a.forceStream {
 		return AntigravityStreamToResponsesHandler(c, info, resp)
 	}
@@ -501,16 +879,13 @@ func (a *Adaptor) GetChannelName() string {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	// Support Claude format (RelayModeUnknown + RelayFormatClaude) in addition to Responses and ChatCompletions
 	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact && info.RelayMode != relayconstant.RelayModeChatCompletions {
-		return "", errors.New("antigravity channel: only /v1/responses, /v1/responses/compact and /v1/chat/completions are supported")
+		if info.RelayFormat != types.RelayFormatClaude {
+			return "", errors.New("antigravity channel: only /v1/responses, /v1/chat/completions and /v1/messages are supported")
+		}
 	}
 
-	// Antigravity API endpoint (internal API)
-	// Format based on OmniRoute implementation:
-	// - Non-streaming: /v1internal:generateContent
-	// - Streaming: /v1internal:streamGenerateContent?alt=sse
-	// Reference: https://github.com/xuantungle/omni-route-proxy-hub/blob/main/open-sse/executors/antigravity.ts
-	
 	var path string
 	if info.IsStream || a.forceStream {
 		path = "/v1internal:streamGenerateContent?alt=sse"
@@ -539,7 +914,6 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	if oauthKey.IsExpired() && oauthKey.RefreshToken != "" {
 		newAccessToken, newExpiredAt, refreshErr := oauthKey.RefreshAccessToken()
 		if refreshErr != nil {
-			// Log the error but don't fail - let the request go through and fail naturally
 			common.SysError("antigravity channel: failed to refresh token: " + refreshErr.Error())
 		} else {
 			oauthKey.AccessToken = newAccessToken
@@ -559,8 +933,8 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	// Set Authorization header
 	req.Set("Authorization", "Bearer "+accessToken)
 
-	// Antigravity-specific headers to mimic Antigravity client
-	// These headers make the request appear to come from Antigravity VS Code extension
+	// Antigravity-specific headers
+	// User-Agent MUST be "antigravity/X.X.X ..." — using "google-api-nodejs-client" causes 404
 	if req.Get("User-Agent") == "" {
 		req.Set("User-Agent", "antigravity/1.104.0 darwin/arm64")
 	}
@@ -601,9 +975,12 @@ func filterAntigravityContents(contents []AntigravityContent) []AntigravityConte
 		}
 
 		// Filter out thought and thoughtSignature parts
+		// NOTE: We keep parts with ThoughtSignature == "skip_thought_signature_validator"
+		// since those are intentionally added by our converter
 		parts := make([]AntigravityPart, 0, len(c.Parts))
 		for _, p := range c.Parts {
-			if p.Thought || p.ThoughtSignature != nil {
+			// Skip thought parts (but keep thoughtSignature "skip_thought_signature_validator")
+			if p.Thought {
 				continue
 			}
 			parts = append(parts, p)
