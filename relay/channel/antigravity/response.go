@@ -355,7 +355,6 @@ func AntigravityGeminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 
 	return gemini.GeminiTextGenerationStreamHandler(c, info, newResp)
 }
-}
 
 // ---- Responses API handlers ----
 // Antigravity returns Gemini-format responses, but the Responses API expects OpenAI Responses format.
