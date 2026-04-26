@@ -442,7 +442,7 @@ func geminiToResponsesOutput(geminiResp map[string]interface{}) []dto.ResponsesO
 				ID:        "fc_" + common.GetRandomString(12),
 				CallId:    "call_" + common.GetRandomString(12),
 				Name:      name,
-				Arguments: string(args),
+				Arguments: json.RawMessage(args),
 				Status:    "completed",
 			})
 			continue
