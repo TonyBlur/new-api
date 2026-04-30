@@ -116,6 +116,17 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       baseUrl: 'Default: https://api.replicate.com',
     },
   },
+  58: {
+    id: 58,
+    name: CHANNEL_TYPES[58],
+    icon: 'google',
+    defaultBaseUrl: 'https://cloudcode-pa.googleapis.com',
+    hints: {
+      key: 'Paste Antigravity OAuth JSON (access_token / refresh_token / project_id)',
+      models: 'claude-opus,claude-sonnet,gemini-3.1-pro,gemini-3-flash',
+      other: 'Obtain OAuth credentials via Google Cloud CLI proxy',
+    },
+  },
 }
 
 /**

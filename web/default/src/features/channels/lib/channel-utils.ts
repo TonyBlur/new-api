@@ -90,6 +90,8 @@ export function getChannelTypeIcon(type: number): string {
     22: 'FastGPT', // FastGPT
     47: 'Xinference', // Xinference
     53: 'OpenAI', // Submodel
+    57: 'OpenAI', // Codex
+    58: 'Gemini', // Antigravity (uses Google Cloud)
 
     // AI Proxy services
     10: 'OpenAI', // AI Proxy

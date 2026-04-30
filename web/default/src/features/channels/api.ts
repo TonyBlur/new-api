@@ -235,6 +235,56 @@ export async function getChannelKey(
 }
 
 // ============================================================================
+// Antigravity Channel Operations
+// ============================================================================
+
+export type AntigravityOAuthStartResponse = {
+  success: boolean
+  message?: string
+  data?: {
+    authorize_url?: string
+  }
+}
+
+export type AntigravityOAuthCompleteResponse = {
+  success: boolean
+  message?: string
+  data?: {
+    oauth_key?: string
+  }
+}
+
+export async function startAntigravityOAuth(): Promise<AntigravityOAuthStartResponse> {
+  const config: ExtendedApiConfig = { skipBusinessError: true }
+  const res = await api.post('/api/channel/antigravity/oauth/start', {}, config)
+  return res.data
+}
+
+export async function completeAntigravityOAuth(
+  input: string
+): Promise<AntigravityOAuthCompleteResponse> {
+  const config: ExtendedApiConfig = { skipBusinessError: true }
+  // Extract code and state from the pasted callback URL
+  let code = input.trim()
+  let state = ''
+  if (code.startsWith('http://') || code.startsWith('https://')) {
+    try {
+      const url = new URL(code)
+      code = url.searchParams.get('code') || ''
+      state = url.searchParams.get('state') || ''
+    } catch {
+      // Not a valid URL, use as-is
+    }
+  }
+  const res = await api.post(
+    '/api/channel/antigravity/oauth/complete',
+    { code, state },
+    config
+  )
+  return res.data
+}
+
+// ============================================================================
 // Codex Channel Operations
 // ============================================================================
 

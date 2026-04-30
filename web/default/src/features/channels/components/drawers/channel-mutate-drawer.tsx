@@ -97,6 +97,7 @@ import {
   refreshCodexCredential,
   updateChannel,
 } from '../../api'
+import { AntigravityOAuthDialog } from '../dialogs/antigravity-oauth-dialog'
 import {
   ADD_MODE_OPTIONS,
   CHANNEL_TYPE_OPTIONS,
@@ -288,6 +289,8 @@ export function ChannelMutateDrawer({
   const [isChannelKeyLoading, setIsChannelKeyLoading] = useState(false)
   const [codexOAuthDialogOpen, setCodexOAuthDialogOpen] = useState(false)
   const [isCodexCredentialRefreshing, setIsCodexCredentialRefreshing] =
+    useState(false)
+  const [antigravityOAuthDialogOpen, setAntigravityOAuthDialogOpen] =
     useState(false)
   const initialModelsRef = useRef<string[]>([])
   const initialModelMappingRef = useRef<string>('')
@@ -929,6 +932,12 @@ export function ChannelMutateDrawer({
   // Submit handler
   const onSubmit = useCallback(
     async (data: ChannelFormValues) => {
+      // Codex/Antigravity channels do not support batch creation
+      if ((data.type === 57 || data.type === 58) && isBatchMode) {
+        toast.error(t('Codex/Antigravity channels do not support batch creation'))
+        return
+      }
+
       // Validate key is required when creating
       if (!isEditing && !data.key?.trim()) {
         form.setError('key', {
@@ -2014,6 +2023,49 @@ export function ChannelMutateDrawer({
                 <CodexOAuthDialog
                   open={codexOAuthDialogOpen}
                   onOpenChange={setCodexOAuthDialogOpen}
+                  onKeyGenerated={(key) => {
+                    form.setValue('key', key, { shouldDirty: true })
+                  }}
+                />
+
+                {currentType === 58 && (
+                  <div className='bg-muted/20 space-y-3 rounded-lg border p-4'>
+                    <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                      <div className='space-y-0.5'>
+                        <div className='text-sm font-semibold'>
+                          {t('Antigravity Authorization')}
+                        </div>
+                        <div className='text-muted-foreground text-xs'>
+                          {t(
+                            'Antigravity channels use an OAuth JSON credential as the key.'
+                          )}
+                        </div>
+                      </div>
+                      <div className='flex flex-wrap items-center gap-2'>
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          onClick={() => setAntigravityOAuthDialogOpen(true)}
+                        >
+                          <Link2 className='mr-2 h-4 w-4' />
+                          {t('Authorize')}
+                        </Button>
+                      </div>
+                    </div>
+                    <Alert>
+                      <AlertDescription>
+                        {t(
+                          'If authorization succeeds, the generated JSON will be inserted into the key field. You still need to save the channel to persist it.'
+                        )}
+                      </AlertDescription>
+                    </Alert>
+                  </div>
+                )}
+
+                <AntigravityOAuthDialog
+                  open={antigravityOAuthDialogOpen}
+                  onOpenChange={setAntigravityOAuthDialogOpen}
                   onKeyGenerated={(key) => {
                     form.setValue('key', key, { shouldDirty: true })
                   }}
