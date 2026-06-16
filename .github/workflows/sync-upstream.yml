@@ -1,0 +1,69 @@
+name: Upstream Sync
+
+permissions:
+  contents: write
+  issues: write
+
+on:
+  schedule:
+    # 每6小时自动执行一次（UTC）
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync_latest_from_upstream:
+    name: Sync latest commits from upstream repo
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Clean issue notice
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: '🚨 Sync Fail',
+              state: 'open'
+            });
+            for (const issue of issues) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              });
+              console.log(`Closed issue #${issue.number}: ${issue.title}`);
+            }
+            console.log(`Closed ${issues.length} open sync-fail issue(s).`);
+
+      - name: Sync upstream changes
+        id: sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
+        with:
+          upstream_sync_repo: Calcium-Ion/new-api
+          upstream_sync_branch: main
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          test_mode: false
+
+      - name: Sync check
+        if: failure()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 同步失败 | Sync Fail',
+              labels: ['🚨 Sync Fail'],
+              body: `Due to conflicts or workflow changes in the [new-api](https://github.com/Calcium-Ion/new-api) upstream repository, the automatic sync has failed. Please manually sync your fork and resolve any conflicts.
+
+            由于 [new-api](https://github.com/Calcium-Ion/new-api) 上游仓库存在冲突或 workflow 变更，自动同步失败。请手动 Sync Fork 并解决冲突。`
+            });
