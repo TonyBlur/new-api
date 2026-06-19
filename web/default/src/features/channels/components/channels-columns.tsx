@@ -1,3 +1,13 @@
+import { useQueryClient } from '@tanstack/react-query'
+import type { ColumnDef } from '@tanstack/react-table'
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  ListOrdered,
+  Shuffle,
+  SlidersHorizontal,
+} from 'lucide-react'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -18,18 +28,24 @@ For commercial licensing, please contact support@quantumnous.com
 */
 /* eslint-disable react-refresh/only-export-components */
 import { useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { type ColumnDef } from '@tanstack/react-table'
-import {
-  AlertTriangle,
-  ChevronDown,
-  ChevronRight,
-  ListOrdered,
-  Shuffle,
-  SlidersHorizontal,
-} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+
+import { ConfirmDialog } from '@/components/confirm-dialog'
+import { BadgeListCell } from '@/components/data-table'
+import { GroupBadge } from '@/components/group-badge'
+import { ProviderBadge } from '@/components/provider-badge'
+import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
+import { TableId } from '@/components/table-id'
+import { TruncatedText } from '@/components/truncated-text'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import {
   formatCurrencyFromUSD,
   formatQuotaWithCurrency,
@@ -40,21 +56,7 @@ import {
   formatQuota as formatQuotaValue,
 } from '@/lib/format'
 import { truncateText } from '@/lib/utils'
-import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
-import { ConfirmDialog } from '@/components/confirm-dialog'
-import { BadgeListCell } from '@/components/data-table'
-import { GroupBadge } from '@/components/group-badge'
-import { ProviderBadge } from '@/components/provider-badge'
-import { StatusBadge } from '@/components/status-badge'
-import { TableId } from '@/components/table-id'
-import { TruncatedText } from '@/components/truncated-text'
+
 import { getCodexUsage } from '../api'
 import { CHANNEL_STATUS_CONFIG, MODEL_FETCHABLE_TYPES } from '../constants'
 import {
@@ -90,7 +92,9 @@ function parseIonetMeta(otherInfo: string | null | undefined): null | {
   source?: string
   deployment_id?: string
 } {
-  if (!otherInfo) return null
+  if (!otherInfo) {
+    return null
+  }
   try {
     const parsed = JSON.parse(otherInfo)
     if (parsed && typeof parsed === 'object') {
@@ -107,14 +111,20 @@ function parseIonetMeta(otherInfo: string | null | undefined): null | {
  */
 function UpstreamUpdateTags({ channel }: { channel: Channel }) {
   const { upstream, setCurrentRow } = useChannels()
-  if (!MODEL_FETCHABLE_TYPES.has(channel.type)) return null
+  if (!MODEL_FETCHABLE_TYPES.has(channel.type)) {
+    return null
+  }
 
   const meta = parseUpstreamUpdateMeta(channel.settings)
-  if (!meta.enabled) return null
+  if (!meta.enabled) {
+    return null
+  }
 
   const addCount = meta.pendingAddModels.length
   const removeCount = meta.pendingRemoveModels.length
-  if (addCount === 0 && removeCount === 0) return null
+  if (addCount === 0 && removeCount === 0) {
+    return null
+  }
 
   return (
     <div className='flex items-center gap-0.5'>
@@ -275,6 +285,7 @@ function WeightCell({ channel }: { channel: Channel }) {
  * notation (e.g. "$28万"); the precise value stays available in the tooltip.
  */
 const MAX_INLINE_BALANCE_CHARS = 8
+const SENSITIVE_MASK = '••••'
 
 /**
  * Balance cell component with click to update
@@ -282,6 +293,7 @@ const MAX_INLINE_BALANCE_CHARS = 8
 function BalanceCell({ channel }: { channel: Channel }) {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
+  const { sensitiveVisible } = useChannels()
   const isTagRow = isTagAggregateRow(channel)
   const balance = channel.balance || 0
   const usedQuota = channel.used_quota || 0
@@ -300,7 +312,9 @@ function BalanceCell({ channel }: { channel: Channel }) {
   const remainingFull = withSuffix(formatBalance(balance))
   const usedDisplay =
     usedFull.length > MAX_INLINE_BALANCE_CHARS
-      ? withSuffix(formatQuotaWithCurrency(usedQuota, { compact: true, locale }))
+      ? withSuffix(
+          formatQuotaWithCurrency(usedQuota, { compact: true, locale })
+        )
       : usedFull
   const remainingDisplay =
     remainingFull.length > MAX_INLINE_BALANCE_CHARS
@@ -308,6 +322,8 @@ function BalanceCell({ channel }: { channel: Channel }) {
       : remainingFull
   const usedLabel = `${t('Used:')} ${usedFull}`
   const remainingLabel = `${t('Remaining:')} ${remainingFull}`
+  const maskedUsedLabel = `${t('Used:')} ${SENSITIVE_MASK}`
+  const maskedRemainingLabel = `${t('Remaining:')} ${SENSITIVE_MASK}`
 
   // Tag row: only show cumulative used quota
   if (isTagRow) {
@@ -317,7 +333,11 @@ function BalanceCell({ channel }: { channel: Channel }) {
           <TooltipTrigger
             render={
               <StatusBadge
-                label={`${t('Used:')} ${usedDisplay}`}
+                label={
+                  sensitiveVisible
+                    ? `${t('Used:')} ${usedDisplay}`
+                    : maskedUsedLabel
+                }
                 variant='neutral'
                 size='sm'
                 copyable={false}
@@ -327,7 +347,7 @@ function BalanceCell({ channel }: { channel: Channel }) {
             }
           />
           <TooltipContent>
-            <p>{usedLabel}</p>
+            <p>{sensitiveVisible ? usedLabel : maskedUsedLabel}</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -338,7 +358,9 @@ function BalanceCell({ channel }: { channel: Channel }) {
   const variant = getBalanceVariant(balance)
 
   const handleClickUpdate = async () => {
-    if (isUpdating) return
+    if (isUpdating) {
+      return
+    }
 
     setIsUpdating(true)
     if (channel.type === 57) {
@@ -362,6 +384,26 @@ function BalanceCell({ channel }: { channel: Channel }) {
     await handleUpdateChannelBalance(channel.id, queryClient)
     setIsUpdating(false)
   }
+  let remainingBadgeLabel = sensitiveVisible
+    ? remainingDisplay
+    : SENSITIVE_MASK
+  if (sensitiveVisible && isUpdating) {
+    remainingBadgeLabel = t('Updating...')
+  } else if (sensitiveVisible && channel.type === 57) {
+    remainingBadgeLabel = t('Account Info')
+  }
+  let remainingTooltipLabel = remainingLabel
+  if (!sensitiveVisible) {
+    remainingTooltipLabel = maskedRemainingLabel
+  } else if (channel.type === 57) {
+    remainingTooltipLabel = t('Click to view Codex usage')
+  }
+  let remainingBadgeVariant: StatusBadgeProps['variant'] = variant
+  if (channel.type === 57) {
+    remainingBadgeVariant = 'info'
+  } else if (isUpdating) {
+    remainingBadgeVariant = 'neutral'
+  }
 
   return (
     <TooltipProvider>
@@ -370,7 +412,7 @@ function BalanceCell({ channel }: { channel: Channel }) {
           <TooltipTrigger
             render={
               <StatusBadge
-                label={usedDisplay}
+                label={sensitiveVisible ? usedDisplay : SENSITIVE_MASK}
                 variant='neutral'
                 size='sm'
                 copyable={false}
@@ -380,27 +422,15 @@ function BalanceCell({ channel }: { channel: Channel }) {
             }
           />
           <TooltipContent>
-            <p>{usedLabel}</p>
+            <p>{sensitiveVisible ? usedLabel : maskedUsedLabel}</p>
           </TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={
               <StatusBadge
-                label={
-                  isUpdating
-                    ? t('Updating...')
-                    : channel.type === 57
-                      ? t('Account Info')
-                      : remainingDisplay
-                }
-                variant={
-                  channel.type === 57
-                    ? 'info'
-                    : isUpdating
-                      ? 'neutral'
-                      : variant
-                }
+                label={remainingBadgeLabel}
+                variant={remainingBadgeVariant}
                 size='sm'
                 copyable={false}
                 showDot={false}
@@ -410,11 +440,7 @@ function BalanceCell({ channel }: { channel: Channel }) {
             }
           />
           <TooltipContent>
-            <p>
-              {channel.type === 57
-                ? t('Click to view Codex usage')
-                : remainingLabel}
-            </p>
+            <p>{remainingTooltipLabel}</p>
             {channel.type !== 57 && <p>{t('Click to update balance')}</p>}
           </TooltipContent>
         </Tooltip>
@@ -425,9 +451,13 @@ function BalanceCell({ channel }: { channel: Channel }) {
         onOpenChange={setCodexUsageOpen}
         channelName={channel.name}
         channelId={channel.id}
+        channelDisplayName={sensitiveVisible ? undefined : SENSITIVE_MASK}
+        channelDisplayId={sensitiveVisible ? undefined : SENSITIVE_MASK}
         response={codexUsageResponse}
         onRefresh={async () => {
-          if (isUpdating) return
+          if (isUpdating) {
+            return
+          }
           setIsUpdating(true)
           try {
             const res = await getCodexUsage(channel.id)
@@ -456,6 +486,7 @@ function BalanceCell({ channel }: { channel: Channel }) {
  */
 export function useChannelsColumns(): ColumnDef<Channel>[] {
   const { t, i18n } = useTranslation()
+  const { sensitiveVisible } = useChannels()
   const locale = i18n.resolvedLanguage || i18n.language
   return [
     // Checkbox column
@@ -497,7 +528,7 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
       meta: { mobileHidden: true },
       cell: ({ row }) => {
         const id = row.getValue('id') as number
-        return <TableId value={id} />
+        return <TableId value={sensitiveVisible ? id : SENSITIVE_MASK} />
       },
       size: 80,
     },
@@ -554,7 +585,7 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
             <div className='flex flex-col gap-1'>
               <div className='flex items-center gap-1.5'>
                 <TruncatedText
-                  text={name}
+                  text={sensitiveVisible ? name : SENSITIVE_MASK}
                   className='font-medium'
                   maxWidth='max-w-[180px]'
                 />
@@ -565,7 +596,7 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
                         render={
                           <AlertTriangle className='h-3.5 w-3.5 flex-shrink-0 text-amber-500' />
                         }
-                      ></TooltipTrigger>
+                      />
                       <TooltipContent side='top'>
                         {t(
                           'Request body pass-through is enabled. The request body will be sent directly to the upstream without any conversion.'
@@ -581,7 +612,7 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
                         render={
                           <SlidersHorizontal className='text-info h-3.5 w-3.5 flex-shrink-0' />
                         }
-                      ></TooltipTrigger>
+                      />
                       <TooltipContent side='top'>
                         {t('Override request parameters')}
                       </TooltipContent>
@@ -698,7 +729,9 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
                         className='flex cursor-pointer items-center gap-1.5 text-xs font-medium'
                         onClick={(e) => {
                           e.stopPropagation()
-                          if (!deploymentId) return
+                          if (!deploymentId) {
+                            return
+                          }
                           const targetUrl = `/models/deployments?dFilter=${encodeURIComponent(String(deploymentId))}`
                           window.open(targetUrl, '_blank', 'noopener')
                         }}
@@ -735,7 +768,9 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
         )
       },
       filterFn: (row, id, value) => {
-        if (!value || value.length === 0 || value.includes('all')) return true
+        if (!value || value.length === 0 || value.includes('all')) {
+          return true
+        }
         return value.includes(String(row.getValue(id)))
       },
       size: 220,
@@ -856,10 +891,16 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
         )
       },
       filterFn: (row, id, value) => {
-        if (!value || value.length === 0 || value.includes('all')) return true
+        if (!value || value.length === 0 || value.includes('all')) {
+          return true
+        }
         const status = row.getValue(id) as number
-        if (value.includes('enabled')) return status === 1
-        if (value.includes('disabled')) return status !== 1
+        if (value.includes('enabled')) {
+          return status === 1
+        }
+        if (value.includes('disabled')) {
+          return status !== 1
+        }
         return false
       },
       size: 120,
@@ -876,9 +917,9 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
         const modelArray = parseModelsList(models)
         return (
           <BadgeListCell
-            items={modelArray.map((model, idx) => (
+            items={modelArray.map((model) => (
               <StatusBadge
-                key={idx}
+                key={model}
                 label={model}
                 autoColor={model}
                 size='sm'
@@ -903,13 +944,20 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
         return (
           <BadgeListCell
             items={groupArray.map((g) => (
-              <GroupBadge key={g} group={g} size='sm' />
+              <GroupBadge
+                key={g}
+                group={g}
+                label={sensitiveVisible ? undefined : SENSITIVE_MASK}
+                size='sm'
+              />
             ))}
           />
         )
       },
       filterFn: (row, id, value) => {
-        if (!value || value.length === 0 || value.includes('all')) return true
+        if (!value || value.length === 0 || value.includes('all')) {
+          return true
+        }
         const group = row.getValue(id) as string
         const groupArray = parseGroupsList(group)
         return groupArray.some((g) => value.includes(g))
@@ -925,8 +973,9 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
       meta: { mobileHidden: true },
       cell: ({ row }) => {
         const tag = row.getValue('tag') as string | null
-        if (!tag)
+        if (!tag) {
           return <span className='text-muted-foreground text-xs'>-</span>
+        }
 
         return (
           <StatusBadge
@@ -1012,11 +1061,15 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
             <Tooltip>
               <TooltipTrigger
                 render={
-                  <span className='text-muted-foreground cursor-pointer font-mono text-sm' />
+                  <StatusBadge
+                    label={timeText}
+                    variant='neutral'
+                    size='sm'
+                    copyable={false}
+                    className='-ml-1.5 cursor-pointer'
+                  />
                 }
-              >
-                {timeText}
-              </TooltipTrigger>
+              />
               <TooltipContent side='top'>
                 <p className='font-mono text-sm'>{fullDate}</p>
               </TooltipContent>
