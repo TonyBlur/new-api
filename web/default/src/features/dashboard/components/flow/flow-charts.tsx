@@ -16,9 +16,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Fragment, useMemo, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { VChart } from '@visactor/react-vchart'
+import type { EventParamsDefinition, IVChart } from '@visactor/vchart'
 import {
   Activity,
   ChevronRight,
@@ -32,13 +40,8 @@ import {
   WalletCards,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useAuthStore } from '@/stores/auth-store'
-import { formatNumber, formatQuota } from '@/lib/format'
-import { ROLE } from '@/lib/roles'
-import { computeTimeRange } from '@/lib/time'
-import { useChartTheme } from '@/lib/use-chart-theme'
-import { cn } from '@/lib/utils'
-import { VCHART_OPTION } from '@/lib/vchart'
+
+import { MultiSelect } from '@/components/multi-select'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   Empty,
@@ -56,12 +59,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { MultiSelect } from '@/components/multi-select'
 import { getFlowQuotaDates } from '@/features/dashboard/api'
 import {
   buildDashboardFlowData,
   buildFlowSankeySpec,
   buildQueryParams,
+  flowNodeFilterFromSankeyDatum,
+  flowSankeyDatumValue,
   getDefaultDays,
   getFlowStages,
 } from '@/features/dashboard/lib'
@@ -72,25 +76,47 @@ import {
 } from '@/features/dashboard/lib/flow-selection'
 import type {
   DashboardFilters,
+  FlowLinkSelection,
   FlowMetric,
+  FlowNodeFilter,
   FlowNodeKind,
+  FlowOverflowMode,
   FlowRole,
-  FlowSummary,
 } from '@/features/dashboard/types'
+import { formatQuota } from '@/lib/format'
+import { ROLE } from '@/lib/roles'
+import { computeTimeRange } from '@/lib/time'
+import { useChartTheme } from '@/lib/use-chart-theme'
+import { cn } from '@/lib/utils'
+import { VCHART_OPTION } from '@/lib/vchart'
+import { useAuthStore } from '@/stores/auth-store'
+import { FlowNodeFilterControl } from './flow-node-filter'
 
 interface FlowChartsProps {
   filters?: DashboardFilters
-}
-
-interface FlowStatsProps {
-  summary: FlowSummary
-  loading?: boolean
+  // When false, sensitive node labels are masked in the rendered Sankey.
+  sensitiveVisible?: boolean
 }
 
 const FLOW_METRIC_OPTIONS = [
-  { value: 'quota', labelKey: 'Quota', icon: WalletCards },
-  { value: 'tokens', labelKey: 'Tokens', icon: Hash },
-  { value: 'requests', labelKey: 'Requests', icon: Activity },
+  { value: 'quota', labelKey: 'By quota', icon: WalletCards },
+  { value: 'tokens', labelKey: 'By tokens', icon: Hash },
+  { value: 'requests', labelKey: 'By requests', icon: Activity },
+] as const
+
+const FLOW_METRIC_LABEL_KEYS: Record<FlowMetric, string> = {
+  quota: 'Quota',
+  tokens: 'Tokens',
+  requests: 'Requests',
+}
+
+const FLOW_TOP_LIMIT_OPTIONS = [10, 20, 50, 100] as const
+
+const DEFAULT_FLOW_TOP_NODE_LIMIT = 50
+
+const FLOW_OVERFLOW_MODE_OPTIONS = [
+  { value: 'aggregate', labelKey: 'Merge into Other' },
+  { value: 'hide', labelKey: 'Hide' },
 ] as const
 
 // A Sankey needs at least two columns to render any link.
@@ -126,69 +152,131 @@ const FLOW_STAGE_META: Record<
   },
 }
 
-function FlowStats(props: FlowStatsProps) {
-  const { t } = useTranslation()
-  const items = [
-    {
-      key: 'quota',
-      title: 'Quota',
-      value: formatQuota(props.summary.quota),
-      icon: WalletCards,
-    },
-    {
-      key: 'tokens',
-      title: 'Tokens',
-      value: formatNumber(props.summary.tokens),
-      icon: Hash,
-    },
-    {
-      key: 'requests',
-      title: 'Requests',
-      value: formatNumber(props.summary.requests),
-      icon: Activity,
-    },
-  ]
+const FLOW_STAGE_LABEL_KEYS: Record<FlowNodeKind, string> = {
+  user: FLOW_STAGE_META.user.labelKey,
+  node: FLOW_STAGE_META.node.labelKey,
+  token: FLOW_STAGE_META.token.labelKey,
+  group: FLOW_STAGE_META.group.labelKey,
+  model: FLOW_STAGE_META.model.labelKey,
+  channel: FLOW_STAGE_META.channel.labelKey,
+}
 
+const FLOW_OTHER_NODE_LABEL_KEYS: Record<FlowNodeKind, string> = {
+  user: 'Other users',
+  node: 'Other nodes',
+  token: 'Other tokens',
+  group: 'Other groups',
+  model: 'Other models',
+  channel: 'Other channels',
+}
+
+type FlowChartPointerEvent = EventParamsDefinition['pointerdown']
+
+function chartRecordValue(
+  value: unknown
+): Record<string, unknown> | undefined {
+  return value && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function looksLikeFlowDatum(value: unknown): boolean {
+  const record = chartRecordValue(value)
+  if (!record) return false
   return (
-    <div className='overflow-hidden rounded-lg border'>
-      <div className='divide-border/60 grid grid-cols-3 divide-x'>
-        {items.map((item) => {
-          const Icon = item.icon
-          return (
-            <div key={item.key} className='px-3 py-2.5 sm:px-5 sm:py-4'>
-              <div className='flex items-center gap-2'>
-                <Icon className='text-muted-foreground/60 size-3.5 shrink-0' />
-                <div className='text-muted-foreground truncate text-xs font-medium tracking-wider uppercase'>
-                  {t(item.title)}
-                </div>
-              </div>
-              {props.loading ? (
-                <div className='mt-2 flex flex-col gap-1.5'>
-                  <Skeleton className='h-7 w-20' />
-                  <Skeleton className='h-3.5 w-28' />
-                </div>
-              ) : (
-                <div className='text-foreground mt-1.5 font-mono text-lg font-bold tracking-tight tabular-nums sm:mt-2 sm:text-2xl'>
-                  {item.value}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
+    (record.key !== undefined && record.kind !== undefined) ||
+    (record.source !== undefined && record.target !== undefined)
+  )
+}
+
+function chartGraphicDatum(value: unknown): unknown {
+  const record = chartRecordValue(value)
+  const context = chartRecordValue(record?.context)
+  const data = context?.data
+  if (Array.isArray(data)) return data[0]
+  return data
+}
+
+function flowChartEventDatum(event: FlowChartPointerEvent): unknown {
+  const record = chartRecordValue(event)
+  if (!record) return undefined
+
+  if (record.datum !== undefined && record.datum !== null) return record.datum
+
+  const itemRecord = chartRecordValue(record.item)
+  if (itemRecord?.datum !== undefined && itemRecord.datum !== null) {
+    return itemRecord.datum
+  }
+
+  const graphicDatum = chartGraphicDatum(record.item)
+  if (graphicDatum !== undefined && graphicDatum !== null) return graphicDatum
+
+  const itemData = itemRecord?.data
+  if (Array.isArray(itemData)) return itemData[0]
+  if (itemData !== undefined && itemData !== null) return itemData
+
+  return looksLikeFlowDatum(record) ? record : undefined
+}
+
+function flowNodeFilterKey(filter: FlowNodeFilter): string {
+  return `${filter.kind}\u0000${filter.id}`
+}
+
+function isSameFlowNodeFilter(
+  a: FlowNodeFilter | undefined,
+  b: FlowNodeFilter
+): boolean {
+  return Boolean(a && a.kind === b.kind && a.id === b.id)
+}
+
+function toggleSelectedValue(values: string[], value: string): string[] {
+  return values.includes(value)
+    ? values.filter((item) => item !== value)
+    : [...values, value]
+}
+
+function toggleSelectedNodeFilter(
+  filters: FlowNodeFilter[],
+  filter: FlowNodeFilter
+): FlowNodeFilter[] {
+  const key = flowNodeFilterKey(filter)
+  const hasFilter = filters.some((item) => flowNodeFilterKey(item) === key)
+  return hasFilter
+    ? filters.filter((item) => flowNodeFilterKey(item) !== key)
+    : [...filters, filter]
+}
+
+function formatFlowMetricNumber(value: number): string {
+  return Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(
+    value
   )
 }
 
 export function FlowCharts(props: FlowChartsProps) {
   const { t } = useTranslation()
   const { resolvedTheme, themeReady } = useChartTheme()
+  const chartInstanceRef = useRef<IVChart | null>(null)
   const user = useAuthStore((state) => state.auth.user)
   const isRoot = Boolean(user?.role && user.role >= ROLE.SUPER_ADMIN)
   const isAdmin = Boolean(user?.role && user.role >= ROLE.ADMIN)
-  const flowRole: FlowRole = isRoot ? 'root' : isAdmin ? 'admin' : 'user'
+  let flowRole: FlowRole = 'user'
+  if (isRoot) {
+    flowRole = 'root'
+  } else if (isAdmin) {
+    flowRole = 'admin'
+  }
   const [metric, setMetric] = useState<FlowMetric>('quota')
+  const [topNodeLimit, setTopNodeLimit] = useState(DEFAULT_FLOW_TOP_NODE_LIMIT)
+  const [overflowMode, setOverflowMode] =
+    useState<FlowOverflowMode>('aggregate')
   const [selectedUsers, setSelectedUsers] = useState<string[]>([])
+  const [selectedNodes, setSelectedNodes] = useState<FlowNodeFilter[]>([])
+  const [activeFlowNode, setActiveFlowNode] = useState<
+    FlowNodeFilter | undefined
+  >()
+  const [activeFlowLink, setActiveFlowLink] = useState<
+    FlowLinkSelection | undefined
+  >()
   const [hiddenStages, setHiddenStages] = useState<FlowNodeKind[]>([])
 
   const stages = useMemo(() => getFlowStages(flowRole), [flowRole])
@@ -196,6 +284,19 @@ export function FlowCharts(props: FlowChartsProps) {
     () => stages.filter((stage) => !hiddenStages.includes(stage)),
     [stages, hiddenStages]
   )
+  useEffect(() => {
+    const visible = new Set(visibleStages)
+    setSelectedNodes((prev) => {
+      const next = prev.filter((filter) => visible.has(filter.kind))
+      return next.length === prev.length ? prev : next
+    })
+    setActiveFlowNode((prev) =>
+      prev && visible.has(prev.kind) ? prev : undefined
+    )
+    // The graph reshapes when columns are toggled, so any highlighted edge may
+    // no longer exist. Drop the link selection rather than leave it dangling.
+    setActiveFlowLink(undefined)
+  }, [visibleStages])
   const toggleStage = (stage: FlowNodeKind) => {
     setHiddenStages((prev) => {
       const hidden = new Set(prev)
@@ -241,15 +342,37 @@ export function FlowCharts(props: FlowChartsProps) {
     staleTime: 60_000,
   })
 
+  const maskSensitive = props.sensitiveVisible === false
   const flowData = useMemo(
     () =>
       buildDashboardFlowData(isLoading ? [] : (flowRows ?? []), metric, {
         role: flowRole,
         selectedUsers,
+        selectedNodes,
+        activeNode: activeFlowNode,
+        activeLink: activeFlowLink,
         visibleStages,
+        topNodeLimit,
+        overflowMode,
+        maskSensitive,
         deletedTokenLabel: (tokenId) => t('Deleted ({{id}})', { id: tokenId }),
+        otherNodeLabel: (kind) => t(FLOW_OTHER_NODE_LABEL_KEYS[kind]),
       }),
-    [flowRole, flowRows, isLoading, metric, selectedUsers, visibleStages, t]
+    [
+      flowRole,
+      flowRows,
+      isLoading,
+      metric,
+      overflowMode,
+      activeFlowNode,
+      activeFlowLink,
+      selectedNodes,
+      selectedUsers,
+      topNodeLimit,
+      visibleStages,
+      maskSensitive,
+      t,
+    ]
   )
   const userFilterOptions = useMemo(
     () =>
@@ -259,6 +382,75 @@ export function FlowCharts(props: FlowChartsProps) {
       })),
     [flowData.filterOptions.users]
   )
+  const nodeFilterStages = useMemo(
+    () => visibleStages.filter((stage) => stage !== 'user'),
+    [visibleStages]
+  )
+  const nodeFilterOptions = useMemo(
+    () =>
+      flowData.filterOptions.nodes.filter((option) => option.kind !== 'user'),
+    [flowData.filterOptions.nodes]
+  )
+  const metricLabel = t(FLOW_METRIC_LABEL_KEYS[metric])
+  const formatNodeMetricValue = useCallback(
+    (value: number) =>
+      metric === 'quota' ? formatQuota(value) : formatFlowMetricNumber(value),
+    [metric]
+  )
+  // Explicit filters (the chips/dropdown control) narrow the rows that feed the
+  // chart. They are intentionally independent from the click-to-highlight state
+  // below so selecting a filter never dims a node, it removes unrelated rows.
+  const toggleFlowNodeFilter = useCallback((filter: FlowNodeFilter) => {
+    if (filter.kind === 'user') {
+      setSelectedUsers((prev) => toggleSelectedValue(prev, filter.id))
+      return
+    }
+    setSelectedNodes((prev) => toggleSelectedNodeFilter(prev, filter))
+  }, [])
+  const removeFlowNodeFilter = useCallback((filter: FlowNodeFilter) => {
+    if (filter.kind === 'user') {
+      setSelectedUsers((prev) => prev.filter((item) => item !== filter.id))
+      return
+    }
+    const key = flowNodeFilterKey(filter)
+    setSelectedNodes((prev) =>
+      prev.filter((item) => flowNodeFilterKey(item) !== key)
+    )
+  }, [])
+  const clearFlowNodeFilters = useCallback(() => {
+    setSelectedNodes([])
+  }, [])
+  // Clicking a node only drives the highlight: keep every node/link on screen
+  // but emphasize the full paths through the clicked node and dim the rest.
+  // Clicking the active node again, or clicking empty space, clears it.
+  const handleChartPointerDown = useCallback((event: FlowChartPointerEvent) => {
+    const datum = flowChartEventDatum(event)
+    const filter = flowNodeFilterFromSankeyDatum(datum)
+    if (filter) {
+      setActiveFlowLink(undefined)
+      setActiveFlowNode((prev) =>
+        isSameFlowNodeFilter(prev, filter) ? undefined : filter
+      )
+      return
+    }
+
+    const source = flowSankeyDatumValue(datum, 'source')
+    const target = flowSankeyDatumValue(datum, 'target')
+    if (typeof source === 'string' && typeof target === 'string') {
+      setActiveFlowNode(undefined)
+      setActiveFlowLink((prev) =>
+        prev && prev.source === source && prev.target === target
+          ? undefined
+          : { source, target }
+      )
+      return
+    }
+
+    setActiveFlowNode(undefined)
+    setActiveFlowLink(undefined)
+    chartInstanceRef.current?.clearState('selected')
+    chartInstanceRef.current?.clearState('blur')
+  }, [])
   const chartTitle = t('Flow')
   const flowSpec = useMemo(
     () =>
@@ -273,9 +465,15 @@ export function FlowCharts(props: FlowChartsProps) {
   const chartTheme = resolvedTheme === 'dark' ? 'dark' : 'light'
   const chartKey = [
     metric,
+    topNodeLimit,
+    overflowMode,
     flowRole,
+    activeFlowNode ? flowNodeFilterKey(activeFlowNode) : '',
+    activeFlowLink ? `${activeFlowLink.source}\u0000${activeFlowLink.target}` : '',
+    selectedNodes.map(flowNodeFilterKey).join(','),
     selectedUsers.join(','),
     visibleStages.join(','),
+    maskSensitive ? 'masked' : 'plain',
     flowRows?.length ?? 0,
     resolvedTheme,
   ].join('-')
@@ -289,49 +487,179 @@ export function FlowCharts(props: FlowChartsProps) {
     flowError instanceof Error
       ? flowError.message
       : t('Please try again later.')
+  let chartContent = (
+    <VChart
+      key={`flow-${chartKey}`}
+      spec={{
+        ...flowSpec,
+        theme: chartTheme,
+        background: 'transparent',
+      }}
+      option={VCHART_OPTION}
+      onReady={(instance: IVChart) => {
+        chartInstanceRef.current = instance
+      }}
+      onPointerDown={handleChartPointerDown}
+    />
+  )
+  if (displayState === 'loading') {
+    chartContent = <Skeleton className='h-full w-full' />
+  } else if (displayState === 'error') {
+    chartContent = (
+      <div className='flex h-full items-center justify-center p-4'>
+        <Alert variant='destructive' className='max-w-md'>
+          <CircleAlert />
+          <AlertTitle>{t('Failed to load')}</AlertTitle>
+          <AlertDescription>{flowErrorMessage}</AlertDescription>
+        </Alert>
+      </div>
+    )
+  } else if (displayState === 'empty') {
+    chartContent = (
+      <Empty className='h-full border-0 py-12'>
+        <EmptyHeader>
+          <EmptyMedia variant='icon'>
+            <Route />
+          </EmptyMedia>
+          <EmptyTitle>{t('No flow data available')}</EmptyTitle>
+          <EmptyDescription>{t('No data available')}</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
 
   return (
     <div className='flex flex-col gap-3'>
-      <FlowStats summary={flowData.summary} loading={isLoading} />
-
-      <div className='flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between'>
-        <div className='flex flex-wrap items-center gap-2'>
-          <Tabs
-            value={metric}
-            onValueChange={(value) => setMetric(value as FlowMetric)}
-            className='shrink-0'
-          >
-            <TabsList>
-              {FLOW_METRIC_OPTIONS.map((option) => (
-                <TabsTrigger
-                  key={option.value}
-                  value={option.value}
-                  className='px-2.5 text-xs'
-                >
-                  {t(option.labelKey)}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-        </div>
-        {isAdmin && (
-          <div className='flex min-w-0 flex-col gap-2 sm:flex-row lg:w-[min(24rem,34vw)]'>
-            <MultiSelect
-              options={userFilterOptions}
-              selected={selectedUsers}
-              onChange={setSelectedUsers}
-              placeholder={t('All users')}
-              emptyText={t('No users')}
-              maxVisibleChips={2}
-              renderSelectedSummary={(values) =>
-                compactFlowSelectionLabel(values.length)
-              }
-            />
+      <div className='flex flex-col gap-2 xl:flex-row xl:items-end xl:justify-between'>
+        <div className='flex min-w-0 flex-wrap items-end gap-2'>
+          <div className='flex min-w-0 flex-col gap-1.5'>
+            <div className='flex items-center gap-1.5'>
+              <span className='text-muted-foreground text-xs font-medium'>
+                {t('Flow width metric')}
+              </span>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type='button'
+                        className='text-muted-foreground/60 hover:text-foreground flex size-5 shrink-0 items-center justify-center rounded-md'
+                        aria-label={t('Flow width metric')}
+                      />
+                    }
+                  >
+                    <Info className='size-3.5' />
+                  </TooltipTrigger>
+                  <TooltipContent className='max-w-[14rem]'>
+                    {t('Choose how flow widths are calculated.')}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            <Tabs
+              value={metric}
+              onValueChange={(value) => setMetric(value as FlowMetric)}
+              className='shrink-0'
+            >
+              <TabsList aria-label={t('Flow width metric')}>
+                {FLOW_METRIC_OPTIONS.map((option) => {
+                  const Icon = option.icon
+                  return (
+                    <TabsTrigger
+                      key={option.value}
+                      value={option.value}
+                      className='gap-1.5 px-2.5 text-xs'
+                    >
+                      <Icon data-icon='inline-start' aria-hidden='true' />
+                      {t(option.labelKey)}
+                    </TabsTrigger>
+                  )
+                })}
+              </TabsList>
+            </Tabs>
           </div>
-        )}
-        {isLoading && (
-          <Loader2 className='text-muted-foreground size-4 animate-spin' />
-        )}
+
+          <div className='flex min-w-0 flex-col gap-1.5'>
+            <span className='text-muted-foreground text-xs font-medium'>
+              {t('Display limit')}
+            </span>
+            <Tabs
+              value={String(topNodeLimit)}
+              onValueChange={(value) => setTopNodeLimit(Number(value))}
+              className='shrink-0'
+            >
+              <TabsList aria-label={t('Display limit')}>
+                {FLOW_TOP_LIMIT_OPTIONS.map((limit) => (
+                  <TabsTrigger
+                    key={limit}
+                    value={String(limit)}
+                    className='px-2.5 text-xs'
+                  >
+                    {t('Top {{count}}', { count: limit })}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
+          </div>
+
+          <div className='flex min-w-0 flex-col gap-1.5'>
+            <span className='text-muted-foreground text-xs font-medium'>
+              {t('Overflow items')}
+            </span>
+            <Tabs
+              value={overflowMode}
+              onValueChange={(value) =>
+                setOverflowMode(value as FlowOverflowMode)
+              }
+              className='shrink-0'
+            >
+              <TabsList aria-label={t('Overflow items')}>
+                {FLOW_OVERFLOW_MODE_OPTIONS.map((option) => (
+                  <TabsTrigger
+                    key={option.value}
+                    value={option.value}
+                    className='px-2.5 text-xs'
+                  >
+                    {t(option.labelKey)}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
+          </div>
+
+          <FlowNodeFilterControl
+            stages={nodeFilterStages}
+            stageLabels={FLOW_STAGE_LABEL_KEYS}
+            metricLabel={metricLabel}
+            formatMetricValue={formatNodeMetricValue}
+            options={nodeFilterOptions}
+            selectedNodes={selectedNodes}
+            onToggleNode={toggleFlowNodeFilter}
+            onRemoveNode={removeFlowNodeFilter}
+            onClearNodes={clearFlowNodeFilters}
+          />
+        </div>
+
+        <div className='flex min-w-0 items-center gap-2 xl:justify-end'>
+          {isAdmin && (
+            <div className='flex min-w-0 flex-col gap-2 sm:flex-row xl:w-[min(24rem,34vw)]'>
+              <MultiSelect
+                options={userFilterOptions}
+                selected={selectedUsers}
+                onChange={setSelectedUsers}
+                placeholder={t('All users')}
+                emptyText={t('No users')}
+                maxVisibleChips={2}
+                renderSelectedSummary={(values) =>
+                  compactFlowSelectionLabel(values.length)
+                }
+              />
+            </div>
+          )}
+          {isLoading && (
+            <Loader2 className='text-muted-foreground size-4 animate-spin' />
+          )}
+        </div>
       </div>
 
       <div className='overflow-hidden rounded-lg border'>
@@ -391,37 +719,7 @@ export function FlowCharts(props: FlowChartsProps) {
           </TooltipProvider>
         </div>
         <div className='h-[560px] p-1.5 sm:h-[680px] sm:p-2 2xl:h-[760px]'>
-          {displayState === 'loading' ? (
-            <Skeleton className='h-full w-full' />
-          ) : displayState === 'error' ? (
-            <div className='flex h-full items-center justify-center p-4'>
-              <Alert variant='destructive' className='max-w-md'>
-                <CircleAlert />
-                <AlertTitle>{t('Failed to load')}</AlertTitle>
-                <AlertDescription>{flowErrorMessage}</AlertDescription>
-              </Alert>
-            </div>
-          ) : displayState === 'empty' ? (
-            <Empty className='h-full border-0 py-12'>
-              <EmptyHeader>
-                <EmptyMedia variant='icon'>
-                  <Route />
-                </EmptyMedia>
-                <EmptyTitle>{t('No flow data available')}</EmptyTitle>
-                <EmptyDescription>{t('No data available')}</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : (
-            <VChart
-              key={`flow-${chartKey}`}
-              spec={{
-                ...flowSpec,
-                theme: chartTheme,
-                background: 'transparent',
-              }}
-              option={VCHART_OPTION}
-            />
-          )}
+          {chartContent}
         </div>
       </div>
     </div>

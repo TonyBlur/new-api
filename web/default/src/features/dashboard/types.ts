@@ -50,6 +50,8 @@ export interface FlowQuotaDataItem {
 
 export type FlowMetric = 'quota' | 'tokens' | 'requests'
 
+export type FlowOverflowMode = 'aggregate' | 'hide'
+
 export type FlowRole = 'user' | 'admin' | 'root'
 
 export type FlowNodeKind =
@@ -60,14 +62,34 @@ export type FlowNodeKind =
   | 'model'
   | 'channel'
 
+export interface FlowNodeFilter {
+  kind: FlowNodeKind
+  id: string
+}
+
+export interface FlowLinkSelection {
+  source: string
+  target: string
+}
+
 export interface FlowBuildOptions {
   role?: FlowRole
   selectedUsers?: string[]
+  selectedNodes?: FlowNodeFilter[]
+  activeNode?: FlowNodeFilter
+  activeLink?: FlowLinkSelection
   colorPalette?: readonly string[]
   visibleStages?: FlowNodeKind[]
+  topNodeLimit?: number
+  overflowMode?: FlowOverflowMode
+  // When true, sensitive node labels (users, tokens, nodes, groups, channels)
+  // are partially masked in the rendered graph while keeping node identity so
+  // the Sankey shape stays intact.
+  maskSensitive?: boolean
   // Resolves the label for a token whose record no longer exists (deleted).
   // Lets the caller inject a localized string such as "Deleted (123)".
   deletedTokenLabel?: (tokenId: number) => string
+  otherNodeLabel?: (kind: FlowNodeKind) => string
 }
 
 export interface DashboardFlowNode {
@@ -80,6 +102,8 @@ export interface DashboardFlowNode {
   tokens: number
   color: string
   colorKey: string
+  highlighted?: boolean
+  dimmed?: boolean
 }
 
 export interface DashboardFlowLink {
@@ -97,6 +121,8 @@ export interface DashboardFlowLink {
   hoverColor: string
   colorKey: string
   share: number
+  highlighted?: boolean
+  dimmed?: boolean
 }
 
 export interface DashboardFlowGraph {
@@ -112,8 +138,18 @@ export interface FlowUserFilterOption {
   color: string
 }
 
+export interface FlowNodeFilterOption {
+  kind: FlowNodeKind
+  value: string
+  label: string
+  valueLabel: string
+  valueRaw: number
+  color: string
+}
+
 export interface FlowFilterOptions {
   users: FlowUserFilterOption[]
+  nodes: FlowNodeFilterOption[]
 }
 
 export interface FlowSummary {
@@ -164,6 +200,14 @@ export interface DashboardChartPreferences {
   modelAnalyticsChart: ModelAnalyticsChartTab
   defaultTimeRangeDays: number
   defaultTimeGranularity: TimeGranularity
+}
+
+// User analytics selections are held by the dashboard parent so they survive
+// switching between dashboard sub-sections, matching the model/flow filters.
+export interface UserChartsFilters {
+  timeGranularity: TimeGranularity
+  selectedRange: number
+  topUserLimit: number
 }
 
 // ============================================================================
