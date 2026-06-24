@@ -100,6 +100,12 @@ export type SystemTaskResponse<TTask = SystemTask | null> = {
   data?: TTask
 }
 
+export type SystemTaskListResponse = {
+  success: boolean
+  message: string
+  data?: SystemTask[]
+}
+
 export type SiteSettings = {
   'theme.frontend': string
   Notice: string
@@ -334,6 +340,8 @@ export type OperationsSettings = {
   SMTPFrom: string
   SMTPToken: string
   SMTPSSLEnabled: boolean
+  SMTPStartTLSEnabled: boolean
+  SMTPInsecureSkipVerify: boolean
   SMTPForceAuthLogin: boolean
   WorkerUrl: string
   WorkerValidKey: string
