@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { ListChecks, RefreshCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { formatTimestampToDate } from '@/lib/format'
+import { formatTimestampRelative, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { ErrorState } from '@/components/error-state'
 import { Badge } from '@/components/ui/badge'
@@ -79,8 +79,12 @@ const TYPE_LABEL: Record<string, string> = {
   log_cleanup: 'Log cleanup',
   channel_test: 'Batch channel test',
   model_update: 'Batch upstream model update',
-  midjourney_poll: 'Midjourney task polling',
+  midjourney_poll: 'Drawing task polling',
   async_task_poll: 'Async task polling',
+}
+
+const TYPE_DISPLAY_ID: Record<string, string> = {
+  midjourney_poll: 'drawing_task_poll',
 }
 
 function isActiveStatus(status: SystemTaskStatus) {
@@ -98,7 +102,7 @@ type SystemTasksTableProps = {
 }
 
 function SystemTasksTable(props: SystemTasksTableProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   return (
     <div className='overflow-x-auto rounded-md border'>
@@ -136,7 +140,7 @@ function SystemTasksTable(props: SystemTasksTableProps) {
                       {t(TYPE_LABEL[task.type] ?? task.type)}
                     </div>
                     <div className='text-muted-foreground font-mono text-[11px]'>
-                      {task.type}
+                      {TYPE_DISPLAY_ID[task.type] ?? task.type}
                     </div>
                   </div>
                 </TableCell>
@@ -172,8 +176,15 @@ function SystemTasksTable(props: SystemTasksTableProps) {
                 <TableCell className='text-muted-foreground max-w-[280px] truncate py-3 font-mono text-xs align-middle'>
                   {task.locked_by || '-'}
                 </TableCell>
-                <TableCell className='text-muted-foreground py-3 text-xs whitespace-nowrap align-middle'>
-                  {formatTimestampToDate(task.updated_at)}
+                <TableCell
+                  className='text-muted-foreground py-3 text-xs whitespace-nowrap align-middle'
+                  title={formatTimestampToDate(task.updated_at)}
+                >
+                  {formatTimestampRelative(
+                    task.updated_at,
+                    'seconds',
+                    i18n.language
+                  )}
                 </TableCell>
                 <TableCell
                   className='text-destructive max-w-[220px] truncate py-3 pr-4 text-xs align-middle'
