@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/samber/lo"
 )
 
@@ -358,9 +359,8 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 	textRaw := convertChatResponseFormatToResponsesText(req.ResponseFormat)
 
 	maxOutputTokens := lo.FromPtrOr(req.MaxTokens, uint(0))
-	maxCompletionTokens := lo.FromPtrOr(req.MaxCompletionTokens, uint(0))
-	if maxCompletionTokens > maxOutputTokens {
-		maxOutputTokens = maxCompletionTokens
+	if req.MaxCompletionTokens != nil {
+		maxOutputTokens = *req.MaxCompletionTokens
 	}
 	// OpenAI Responses API rejects max_output_tokens < 16 when explicitly provided.
 	//if maxOutputTokens > 0 && maxOutputTokens < 16 {
@@ -380,6 +380,14 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 		presencePenaltyRaw, _ = kitutil.Marshal(req.PresencePenalty)
 	}
 
+	var promptCacheKeyRaw json.RawMessage
+	if req.PromptCacheKey != "" {
+		promptCacheKeyRaw, err = kitutil.Marshal(req.PromptCacheKey)
+		if err != nil {
+			return nil, fmt.Errorf("marshal prompt_cache_key: %w", err)
+		}
+	}
+
 	out := &dto.OpenAIResponsesRequest{
 		Model:             req.Model,
 		Input:             inputRaw,
@@ -396,6 +404,7 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 		ParallelToolCalls: parallelToolCallsRaw,
 		Store:             req.Store,
 		Metadata:          req.Metadata,
+		PromptCacheKey:    promptCacheKeyRaw,
 		EnableThinking:    req.EnableThinking,
 		ThinkingBudget:    req.ThinkingBudget,
 	}
@@ -403,11 +412,12 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 		out.MaxOutputTokens = lo.ToPtr(maxOutputTokens)
 	}
 
-	if req.ReasoningEffort != "" {
-		out.Reasoning = &dto.Reasoning{
-			Effort:  req.ReasoningEffort,
-			Summary: "detailed",
-		}
+	reasoningIntent, err := reasoning.FromOpenAIChat(req)
+	if err != nil {
+		return nil, reasoning.AsClientError(err)
+	}
+	if err := reasoning.ApplyToOpenAIResponses(out, reasoningIntent); err != nil {
+		return nil, reasoning.AsClientError(err)
 	}
 
 	return out, nil
